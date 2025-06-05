@@ -5,7 +5,7 @@ import pytest
 
 SCRIPT = Path(__file__).parent.parent / "run.py"
 
-def _make_case(task_name: str, is_training, str) -> tuple[str]:
+def _make_case(task_name: str, is_training: str) -> tuple[str]:
     return (
         "--task_name",      task_name,
         "--is_training",    is_training,
