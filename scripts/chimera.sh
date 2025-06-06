@@ -1,6 +1,6 @@
 export CUDA_VISIBLE_DEVICES=$3
 
-all_models=("FiLM" "DLinear" "Transformer" "Reformer" "Informer" "Autoformer" "FEDformer" "Nonstationary_Transformer" "Crossformer" "PatchTST" "iTransformer")
+all_models=("Chimera")
 start_index=$1
 end_index=$2
 models=("${all_models[@]:$start_index:$end_index-$start_index+1}")
@@ -34,6 +34,7 @@ do
           --features M \
           --seq_len 24 \
           --label_len 12 \
+          --d_llm 768 \
           --pred_len $pred_len \
           --des 'Exp' \
           --seed $seed \
@@ -41,7 +42,7 @@ do
           --text_len 4 \
           --prompt_weight 0.3 \
           --pool_type "avg" \
-          --save_name "results/result_health_gpt2_all_w3.txt" \
+          --save_name "results/result_chimera.txt" \
           --llm_model GPT2 \
           --huggingface_token 'NA'\
           --use_fullmodel $use_fullmodel

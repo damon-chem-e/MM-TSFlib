@@ -362,6 +362,20 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         self.mlp_proj=self.mlp_proj.to(self.device)
         self.learning_rate2=1e-2
         self.learning_rate3=1e-3
+        
+    def _select_criterion(self):
+        # Keep existing criterion selection
+        criterion = nn.MSELoss()
+        return criterion
+
+    def _calculate_gate_regularization_loss(self, gate_value):
+        """Calculates L1 regularization loss for the gate."""
+        if gate_value is None or self.args.gate_regularization_lambda <= 0:
+            return 0.0
+        # L1 penalty pushing gate towards 0 or 1 (away from 0.5)
+        reg_loss = torch.mean(torch.abs(gate_value - 0.5))
+        return self.args.gate_regularization_lambda * reg_loss
+        
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
 
@@ -422,17 +436,35 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 # encoder - decoder
-                if self.args.use_amp:
-                    with torch.cuda.amp.autocast():
+                
+                # --- Forward pass --- 
+                outputs = None
+                gate_value = None 
+                
+                if self.args.model == 'ChimeraTransformer':
+                    if self.args.gate_regularization_lambda > 0 and self.model.training:
+                        outputs, gate_value = self.model(batch_x, batch_x_mark, 
+                                                          batch_y[:, :self.args.label_len, :], 
+                                                          batch_y_mark[:, :self.args.label_len, :], 
+                                                          text_embeddings)
+                    else:
+                        outputs = self.model(batch_x, batch_x_mark, 
+                                             batch_y[:, :self.args.label_len, :], 
+                                             batch_y_mark[:, :self.args.label_len, :], 
+                                             text_embeddings)
+                else:
+                    if self.args.use_amp:
+                        with torch.cuda.amp.autocast():
+                            if self.args.output_attention:
+                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            else:
+                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                else:
-                    if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                    else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 if self.Doc2Vec==False:
@@ -538,17 +570,35 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 # encoder - decoder
-                if self.args.use_amp:
-                    with torch.cuda.amp.autocast():
+                
+                # --- Forward pass --- 
+                outputs = None
+                gate_value = None 
+                
+                if self.args.model == 'ChimeraTransformer':
+                    if self.args.gate_regularization_lambda > 0 and self.model.training:
+                        outputs, gate_value = self.model(batch_x, batch_x_mark, 
+                                                          batch_y[:, :self.args.label_len, :], 
+                                                          batch_y_mark[:, :self.args.label_len, :], 
+                                                          text_embeddings)
+                    else:
+                        outputs = self.model(batch_x, batch_x_mark, 
+                                             batch_y[:, :self.args.label_len, :], 
+                                             batch_y_mark[:, :self.args.label_len, :], 
+                                             text_embeddings)
+                else:
+                    if self.args.use_amp:
+                        with torch.cuda.amp.autocast():
+                            if self.args.output_attention:
+                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            else:
+                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                else:
-                    if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                    else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 if self.Doc2Vec==False:
@@ -667,17 +717,33 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 # encoder - decoder
-                if self.args.use_amp:
-                    with torch.cuda.amp.autocast():
+                # --- Forward pass --- 
+                outputs = None
+                gate_value = None 
+                
+                if self.args.model == 'ChimeraTransformer':
+                    if self.args.gate_regularization_lambda > 0 and self.model.training:
+                        outputs, gate_value = self.model(batch_x, batch_x_mark, 
+                                                          batch_y[:, :self.args.label_len, :], 
+                                                          batch_y_mark[:, :self.args.label_len, :], 
+                                                          text_embeddings)
+                    else:
+                        outputs = self.model(batch_x, batch_x_mark, 
+                                             batch_y[:, :self.args.label_len, :], 
+                                             batch_y_mark[:, :self.args.label_len, :], 
+                                             text_embeddings)
+                else:
+                    if self.args.use_amp:
+                        with torch.cuda.amp.autocast():
+                            if self.args.output_attention:
+                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            else:
+                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                else:
-                    if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                    else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 if self.Doc2Vec==False:
