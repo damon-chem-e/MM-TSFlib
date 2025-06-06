@@ -27,6 +27,7 @@ dependencies = [
     "protobuf>=6.31.1",
     "pytest>=8.4.0",
     "pyyaml>=6.0.2",
+    "ray[tune]>=2.46.0",
     "reformer-pytorch>=1.4.4",
     "regex>=2024.11.6",
     "requests>=2.32.3",
