@@ -7,7 +7,9 @@ This document provides a comprehensive guide to all options available in `run.py
 ### Task Configuration
 - `--task_name`: Specifies the type of task to perform. Options include:
   - `long_term_forecast`: Long-term time series forecasting
+    - Forecasts using arbitrary `pred_len` passed as parameter. Intended to have long `seq_len`. Multi-modal. Is the entire MM-TSF model (from frozen LLM to everything after).
   - `short_term_forecast`: Short-term time series forecasting
+    - Matches M4 competition. Uses M4 competition forecast horizon, fixed so context = 2x horizon, uni-modal (just benchmarking existing TS models), outputs loss and predictions in M4-style csv.
   - `imputation`: Time series imputation
   - `anomaly_detection`: Anomaly detection in time series
   - `classification`: Time series classification
