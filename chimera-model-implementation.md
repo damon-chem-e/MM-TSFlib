@@ -542,22 +542,15 @@ All gating mechanisms first require projecting the fused latent features $ F $ t
         $$
         where $ W_{g1} \in \mathbb{R}^{(d_f + d_t) \times d_h} $, $ b_{g1} \in \mathbb{R}^{d_h} $, $ W_{g2} \in \mathbb{R}^{d_h \times d_t} $, $ b_{g2} \in \mathbb{R}^{d_t} $.
 
-    *   **`simple_linear` Gate Type**:
+    *   **`linear` Gate Type**:
         A single linear layer computes the gate $ \alpha \in [0, 1]^{B \times L \times d_t} $:
         $$
         \alpha = \sigma(W_g C + b_g)
         $$
         where $ W_g \in \mathbb{R}^{(d_f + d_t) \times d_t} $, $ b_g \in \mathbb{R}^{d_t} $.
 
-    *   **`lightweight_linear` Gate Type**:
+    *   **`linear_norm` Gate Type**:
         A single linear layer followed by Layer Normalization computes the gate $ \alpha \in [0, 1]^{B \times L \times d_t} $:
-        $$
-        \alpha = \sigma(\text{LayerNorm}(W_g C + b_g))
-        $$
-        where $ W_g \in \mathbb{R}^{(d_f + d_t) \times d_t} $, $ b_g \in \mathbb{R}^{d_t} $.
-
-    *   **`vector_gate_linear` Gate Type**:
-        A single linear layer followed by Layer Normalization computes the gate $ \alpha \in [0, 1]^{B \times L \times d_t} $ (same computation as `lightweight_linear`):
         $$
         \alpha = \sigma(\text{LayerNorm}(W_g C + b_g))
         $$

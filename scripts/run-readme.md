@@ -36,7 +36,6 @@ This document provides a comprehensive guide to all options available in `run.py
 - `--d_ff`: Dimension of the feed-forward network (defaults to 4 * d_model)
 - `--e_layers`: Number of encoder layers
 - `--d_layers`: Number of decoder layers
-- `--d_llm`: Dimension of the LLM embeddings for multimodal fusion
 - `--text_emb`: Dimension of text embeddings
 - `--llm_dim`: Dimension of LLM output
 - `--llm_layers`: Number of LLM layers to use

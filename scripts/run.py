@@ -61,7 +61,6 @@ if __name__ == '__main__':
     parser.add_argument('--dec_in', type=int, default=7, help='decoder input size')
     parser.add_argument('--c_out', type=int, default=7, help='output size')
     parser.add_argument('--d_model', type=int, default=512, help='dimension of model')
-    parser.add_argument('--d_llm', type=int, default=512, help='dimension of model') # TODO: Temporary. Should pull from huggingface model.
     parser.add_argument('--n_heads', type=int, default=8, help='num of heads')
     parser.add_argument('--e_layers', type=int, default=2, help='num of encoder layers')
     parser.add_argument('--d_layers', type=int, default=1, help='num of decoder layers')
@@ -87,24 +86,6 @@ if __name__ == '__main__':
                         help='down sampling method, only support avg, max, conv')
     parser.add_argument('--seg_len', type=int, default=48,
                         help='the length of segmen-wise iteration of SegRNN')
-
-    # Chimera model parameters
-    parser.add_argument('--text_fusion_layers', type=int, default=2, 
-                        help='number of self-attention layers to process text embeddings')
-    parser.add_argument('--post_fusion_layers', type=int, default=2, 
-                        help='number of self-attention layers after cross-attention fusion')
-    parser.add_argument('--final_layers', type=int, default=1, 
-                        help='number of final self-attention layers after gated fusion')
-    parser.add_argument('--fusion_heads', type=int, default=8, 
-                        help='number of attention heads in cross-modal fusion')
-    parser.add_argument('--latent_dim', type=int, default=256, 
-                        help='dimension of shared latent space for fusion')
-    parser.add_argument('--gate_type', type=str, default='per_token_scalar', 
-                        help='Type of gating mechanism: mlp, simple_linear, lightweight_linear, vector_gate_linear, per_token_scalar, global_scalar')
-    parser.add_argument('--gate_hidden_dim', type=int, default=512, 
-                        help='hidden dimension for MLP feature gating network (only used if gate_type is mlp)')
-    parser.add_argument('--gate_regularization_lambda', type=float, default=0.0, 
-                        help='Lambda for L1 gate regularization (pushing gate value away from 0.5). Default 0.0 (disabled).')
 
     # optimization
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')

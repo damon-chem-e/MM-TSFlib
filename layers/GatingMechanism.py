@@ -15,19 +15,13 @@ class FeatureGate(nn.Module):
             \alpha = \sigma(W_{g2} \cdot \text{ReLU}(W_{g1} C + b_{g1}) + b_{g2}) 
             $$
             
-    - 'simple_linear': Simple adaptive gate (alpha) using one linear layer on concatenated features. 
+    - 'linear': Simple adaptive gate (alpha) using one linear layer on concatenated features. 
             Computes gate $$ \alpha \in [0, 1]^{B \times L \times d_t} $$.
             $$
             \alpha = \sigma(W_g C + b_g)
             $$
             
-    - 'lightweight_linear': Lightweight linear gate using LayerNorm.
-            Computes gate $$ \alpha \in [0, 1]^{B \times L \times d_t} $$.
-            $$
-            \alpha = \sigma(\text{LayerNorm}(W_g C + b_g))
-            $$
-            
-    - 'vector_gate_linear': Lightweight linear gate (G) using LayerNorm, applied like MLP gate.
+    - 'linear_norm': Lightweight linear gate using LayerNorm.
             Computes gate $$ \alpha \in [0, 1]^{B \times L \times d_t} $$.
             $$
             \alpha = \sigma(\text{LayerNorm}(W_g C + b_g))
@@ -46,7 +40,7 @@ class FeatureGate(nn.Module):
             $$
             
     """
-    def __init__(self, fused_dim, ts_dim, gate_type='mlp', hidden_dim=None):
+    def __init__(self, fused_dim, ts_dim, gate_type='per_token_scalar', hidden_dim=None):
         """
         Inputs:
         - **Fused Latent Features**: $$ F \in \mathbb{R}^{B \times L \times d_f} $$, the output of the cross-attention mechanism (potentially after post-fusion self-attention), where $$ d_f $$ is `latent_dim`.
@@ -85,13 +79,13 @@ class FeatureGate(nn.Module):
                 nn.Linear(hidden_dim, ts_dim),
                 nn.Sigmoid()
             )
-        elif gate_type == 'simple_linear':
+        elif gate_type == 'linear':
             # Computes alpha = sigma(Linear([F, T]))
             self.gate_network = nn.Sequential(
                 nn.Linear(fused_dim + ts_dim, ts_dim),
                 nn.Sigmoid()
             )
-        elif gate_type == 'lightweight_linear' or gate_type == 'vector_gate_linear': # Use same computation
+        elif gate_type == 'linear_norm':
             # Computes gate = sigma(LayerNorm(Linear([F, T])))
             self.gate_network = nn.Sequential(
                 nn.Linear(fused_dim + ts_dim, ts_dim),
@@ -105,7 +99,7 @@ class FeatureGate(nn.Module):
                 nn.Sigmoid()
             )
         else:
-            raise ValueError(f"Unsupported gate_type: {gate_type}. Choose 'mlp', 'simple_linear', 'lightweight_linear', 'vector_gate_linear', 'per_token_scalar', 'global_scalar'.")
+            raise ValueError(f"Unsupported gate_type: {gate_type}. Choose 'mlp', 'linear', 'linear_norm', 'per_token_scalar', 'global_scalar'.")
 
     def forward(self, fused_latent_features, ts_features):
         """

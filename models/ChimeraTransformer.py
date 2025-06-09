@@ -1,82 +1,80 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from layers.Transformer_EncDec import Encoder, EncoderLayer
 from layers.SelfAttention_Family import FullAttention, AttentionLayer
 from layers.Embed import DataEmbedding_inverted
 from layers.CrossAttention import MultiheadLatentAttention
 from layers.GatingMechanism import FeatureGate
-import numpy as np
 
 class Model(nn.Module):
     def __init__(self, configs):
-        super(Model, self).__init__()
+        super().__init__()
         self.task_name = configs.task_name
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
-        self.output_attention = configs.output_attention
-        self.configs = configs  # Store configs for helper methods
+        self.configs = configs # Store configs for helper methods
         self.gate_regularization = configs.gate_regularization_lambda > 0
-
-        # Build model components modularly
+        self.training = configs.is_training
+        
+        # Build model components 
         self._build_itransformer_components()
-        self._build_text_fusion_components()
+        self._build_text_self_attention()
         self._build_cross_attention()
         self._build_post_fusion_layers()
         self._build_gating_mechanism()
         self._build_final_layers()
         self._build_projection_head()
-
+        
     def _build_itransformer_components(self):
         """Initializes the core iTransformer components (embedding and encoder)."""
         configs = self.configs
-        self.enc_embedding = DataEmbedding_inverted(configs.seq_len, configs.d_model, configs.embed, configs.freq,
-                                                   configs.dropout)
+        self.enc_embedding = DataEmbedding_inverted(c_in=configs.seq_len, d_model=configs.d_model, 
+                                                    freq=configs.freq, dropout=configs.dropout)
         self.encoder = Encoder(
             [
                 EncoderLayer(
                     AttentionLayer(
-                        FullAttention(False, configs.factor, attention_dropout=configs.dropout,
-                                     output_attention=self.output_attention), configs.d_model, configs.n_heads),
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        configs.d_model, configs.n_heads),
                     configs.d_model,
                     configs.d_ff,
                     dropout=configs.dropout,
                     activation=configs.activation
-                ) for _ in range(configs.e_layers)
+                ) for _ in range(configs.num_layers)
             ],
             norm_layer=torch.nn.LayerNorm(configs.d_model)
         )
-
-    def _build_text_fusion_components(self):
-        """Initializes the text processing components (optional self-attention)."""
+        
+    def _build_text_self_attention(self):
+        """Inits the text processing components (optional self-attention following text embeddings)"""
         configs = self.configs
-        self.text_fusion_layers = configs.text_fusion_layers
+        self.num_layers_llm = configs.num_layers_llm
         self.text_encoder = None
         if self.text_fusion_layers > 0:
             self.text_encoder = Encoder(
-                [
-                    EncoderLayer(
-                        AttentionLayer(
-                            FullAttention(False, configs.factor, attention_dropout=configs.dropout,
-                                         output_attention=self.output_attention), configs.d_llm, configs.n_heads),
-                        configs.d_llm,
-                        configs.d_ff,
-                        dropout=configs.dropout,
-                        activation=configs.activation
-                    ) for _ in range(self.text_fusion_layers)
-                ],
-                norm_layer=torch.nn.LayerNorm(configs.d_llm)
-            )
-
+            [
+                EncoderLayer(
+                    AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        configs.d_llm, configs.n_heads),
+                    configs.d_llm,
+                    configs.d_ff,
+                    dropout=configs.dropout,
+                    activation=configs.activation
+                ) for _ in range(self.num_layers_llm)
+            ],
+            norm_layer=torch.nn.LayerNorm(configs.d_llm)
+        )
+            
     def _build_cross_attention(self):
         """Initializes the cross-modal attention mechanism."""
         configs = self.configs
-        self.latent_dim = configs.latent_dim if hasattr(configs, 'latent_dim') else min(configs.d_model, configs.d_llm)
+        self.d_latent = configs.d_latent if hasattr(configs, 'd_latent') else min(configs.d_model, configs.d_llm)
         self.cross_attention = MultiheadLatentAttention(
-            query_dim=configs.d_llm,       # Text features dimension
-            key_dim=configs.d_model,       # Time series features dimension
-            latent_dim=self.latent_dim,
-            num_heads=configs.fusion_heads if hasattr(configs, 'fusion_heads') else configs.n_heads,
+            query_dim=configs.d_llm,
+            key_dim=configs.d_model,
+            latent_dim=self.d_latent,
+            num_heads = configs.fusion_heads if hasattr(configs, 'fusion_heads') else configs.n_heads,
             dropout=configs.dropout
         )
 
@@ -87,30 +85,30 @@ class Model(nn.Module):
         self.post_fusion_encoder = None
         if self.post_fusion_layers > 0:
             self.post_fusion_encoder = Encoder(
-                [
-                    EncoderLayer(
-                        AttentionLayer(
-                            FullAttention(False, configs.factor, attention_dropout=configs.dropout,
-                                         output_attention=self.output_attention), self.latent_dim, configs.n_heads),
-                        self.latent_dim,
-                        configs.d_ff,
-                        dropout=configs.dropout,
-                        activation=configs.activation
-                    ) for _ in range(self.post_fusion_layers)
-                ],
-                norm_layer=torch.nn.LayerNorm(self.latent_dim)
-            )
-
+            [
+                EncoderLayer(
+                    AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        configs.d_latent, configs.n_heads),
+                    configs.d_latent,
+                    configs.d_ff,
+                    dropout=configs.dropout,
+                    activation=configs.activation
+                ) for _ in range(self.post_fusion_layers)
+            ],
+            norm_layer=torch.nn.LayerNorm(configs.d_latent)
+        )
+            
     def _build_gating_mechanism(self):
-        """Initializes the gating mechanism based on the specified type."""
+        """Initializes the gating mechanism based on the specific type."""
         configs = self.configs
         self.feature_gate = FeatureGate(
-            fused_dim=self.latent_dim,     # Dimension of latent space from cross-attention/post-fusion
-            ts_dim=configs.d_model,        # Dimension of original time series features
+            fused_dim = self.latent_dim,
+            ts_dim=configs.d_model,
             gate_type=configs.gate_type,
             hidden_dim=configs.gate_hidden_dim if hasattr(configs, 'gate_hidden_dim') else 2*configs.d_model # Only used for mlp gate
         )
-
+        
     def _build_final_layers(self):
         """Initializes the optional final self-attention layers after gating."""
         configs = self.configs
@@ -121,8 +119,8 @@ class Model(nn.Module):
                 [
                     EncoderLayer(
                         AttentionLayer(
-                            FullAttention(False, configs.factor, attention_dropout=configs.dropout,
-                                         output_attention=self.output_attention), configs.d_model, configs.n_heads),
+                            FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                            configs.d_model, configs.n_heads),
                         configs.d_model,
                         configs.d_ff,
                         dropout=configs.dropout,
@@ -131,24 +129,12 @@ class Model(nn.Module):
                 ],
                 norm_layer=torch.nn.LayerNorm(configs.d_model)
             )
-
+            
     def _build_projection_head(self):
-        """Initializes the task-specific projection head."""
+        """Initializes the projection head."""
         configs = self.configs
-        if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
-            self.projection = nn.Linear(configs.d_model, configs.pred_len, bias=True)
-        elif self.task_name == 'imputation':
-            self.projection = nn.Linear(configs.d_model, configs.seq_len, bias=True)
-        elif self.task_name == 'anomaly_detection':
-            self.projection = nn.Linear(configs.d_model, configs.seq_len, bias=True)
-        elif self.task_name == 'classification':
-            self.act = F.gelu
-            self.dropout = nn.Dropout(configs.dropout)
-            self.projection = nn.Linear(configs.d_model * configs.enc_in, configs.num_class)
-        else:
-            # Default or raise error for unsupported task
-            self.projection = nn.Linear(configs.d_model, configs.pred_len, bias=True)
-
+        self.projection = nn.Linear(configs.d_model, configs.pred_len, bias=True)
+        
     def forward_text_encoder(self, text_embeddings):
         """Process text embeddings through optional self-attention layers."""
         if self.text_encoder is not None:
@@ -239,29 +225,13 @@ class Model(nn.Module):
             return dec_out, gate_value
         else:
             return dec_out
-
-    # Implement other task methods (imputation, anomaly_detection, classification) similarly
-    # by adapting the existing iTransformer implementations with the fusion components
-
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings=None, mask=None):
-        # Handle different tasks
-        if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
-            if self.gate_regularization and self.training:
-                dec_out, gate_value = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings)
-                return dec_out, gate_value # Return gate for regularization loss
-            else:
-                dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings)
-                return dec_out  # [B, L, D]
         
-        elif self.task_name == 'imputation':
-            # Adapt imputation method similarly, potentially returning gate value
-            pass 
-        elif self.task_name == 'anomaly_detection':
-            # Adapt anomaly detection method similarly
-            pass
-        elif self.task_name == 'classification':
-            # Adapt classification method similarly
-            pass
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings=None, mask=None):
+        # Long term forecasting task
+        if self.gate_regularization and self.training:
+            dec_out, gate_value = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings)
+            return dec_out, gate_value # Return gate for regularization loss
         
         # Fallback or error for unsupported task
-        return None 
+        return None
+    
