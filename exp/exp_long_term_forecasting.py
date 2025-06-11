@@ -446,30 +446,32 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                if self.Doc2Vec==False:
-                    if self.pool_type=="avg":                
-                        global_avg_pool = F.adaptive_avg_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
-                        prompt_emb=global_avg_pool.unsqueeze(-1)
-                    elif self.pool_type=="max":
-                        global_max_pool = F.adaptive_max_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
-                        prompt_emb=global_max_pool.unsqueeze(-1)
-                    elif self.pool_type=="min":
-                        global_min_pool = F.adaptive_max_pool1d(-1.0*prompt_emb.transpose(1, 2), 1).squeeze(2)
-                        prompt_emb=global_min_pool.unsqueeze(-1)
-                    elif self.pool_type == "attention":
-
-                        outputs_reshaped = outputs
-                        attention_scores = torch.bmm(prompt_emb, outputs_reshaped)  
-                        attention_weights = F.softmax(attention_scores, dim=1)  
-
-                        weighted_prompt_emb = torch.sum(prompt_emb * attention_weights, dim=1)  
-
-                        prompt_emb = weighted_prompt_emb.unsqueeze(-1)  
                 
-                else:
-                    prompt_emb=prompt_emb.unsqueeze(-1)
-                prompt_y=norm(prompt_emb)+prior_y
-                outputs=(1-self.prompt_weight)*outputs+self.prompt_weight*prompt_y
+                if self.args.model != 'ChimeraTransformer':
+                    if self.Doc2Vec==False:
+                        if self.pool_type=="avg":                
+                            global_avg_pool = F.adaptive_avg_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
+                            prompt_emb=global_avg_pool.unsqueeze(-1)
+                        elif self.pool_type=="max":
+                            global_max_pool = F.adaptive_max_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
+                            prompt_emb=global_max_pool.unsqueeze(-1)
+                        elif self.pool_type=="min":
+                            global_min_pool = F.adaptive_max_pool1d(-1.0*prompt_emb.transpose(1, 2), 1).squeeze(2)
+                            prompt_emb=global_min_pool.unsqueeze(-1)
+                        elif self.pool_type == "attention":
+
+                            outputs_reshaped = outputs
+                            attention_scores = torch.bmm(prompt_emb, outputs_reshaped)  
+                            attention_weights = F.softmax(attention_scores, dim=1)  
+
+                            weighted_prompt_emb = torch.sum(prompt_emb * attention_weights, dim=1)  
+
+                            prompt_emb = weighted_prompt_emb.unsqueeze(-1)  
+                    
+                    else:
+                        prompt_emb=prompt_emb.unsqueeze(-1)
+                    prompt_y=norm(prompt_emb)+prior_y
+                    outputs=(1-self.prompt_weight)*outputs+self.prompt_weight*prompt_y
 
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
 
@@ -570,34 +572,34 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                if self.Doc2Vec==False:
-                    if self.pool_type=="avg":                
-                        global_avg_pool = F.adaptive_avg_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
-                        prompt_emb=global_avg_pool.unsqueeze(-1)
-                    elif self.pool_type=="max":
-                        global_max_pool = F.adaptive_max_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
-                        prompt_emb=global_max_pool.unsqueeze(-1)
-                    elif self.pool_type=="min":
-                        global_min_pool = F.adaptive_max_pool1d(-1.0*prompt_emb.transpose(1, 2), 1).squeeze(2)
-                        prompt_emb=global_min_pool.unsqueeze(-1)
-                    elif self.pool_type == "attention":
-
-                        outputs_reshaped = outputs#.transpose(1, 2) 
-                        outputs_norm = F.normalize(outputs_reshaped, p=2, dim=1)
-                        prompt_emb_norm = F.normalize(prompt_emb, p=2, dim=2)
-                        attention_scores = torch.bmm(prompt_emb_norm, outputs_norm) 
-                        attention_weights = F.softmax(attention_scores, dim=1)
-                        
-
-                        weighted_prompt_emb = torch.sum(prompt_emb * attention_weights, dim=1)  
-
-                        prompt_emb = weighted_prompt_emb.unsqueeze(-1)  
-                else:
-                    prompt_emb=prompt_emb.unsqueeze(-1)
-                prompt_y=norm(prompt_emb)+prior_y
-                outputs=(1-self.prompt_weight)*outputs+self.prompt_weight*prompt_y
                 
-                
+                if self.args.model != 'ChimeraTransformer':
+                    if self.Doc2Vec==False:
+                        if self.pool_type=="avg":                
+                            global_avg_pool = F.adaptive_avg_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
+                            prompt_emb=global_avg_pool.unsqueeze(-1)
+                        elif self.pool_type=="max":
+                            global_max_pool = F.adaptive_max_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
+                            prompt_emb=global_max_pool.unsqueeze(-1)
+                        elif self.pool_type=="min":
+                            global_min_pool = F.adaptive_max_pool1d(-1.0*prompt_emb.transpose(1, 2), 1).squeeze(2)
+                            prompt_emb=global_min_pool.unsqueeze(-1)
+                        elif self.pool_type == "attention":
+
+                            outputs_reshaped = outputs#.transpose(1, 2) 
+                            outputs_norm = F.normalize(outputs_reshaped, p=2, dim=1)
+                            prompt_emb_norm = F.normalize(prompt_emb, p=2, dim=2)
+                            attention_scores = torch.bmm(prompt_emb_norm, outputs_norm) 
+                            attention_weights = F.softmax(attention_scores, dim=1)
+                            
+
+                            weighted_prompt_emb = torch.sum(prompt_emb * attention_weights, dim=1)  
+
+                            prompt_emb = weighted_prompt_emb.unsqueeze(-1)  
+                    else:
+                        prompt_emb=prompt_emb.unsqueeze(-1)
+                    prompt_y=norm(prompt_emb)+prior_y
+                    outputs=(1-self.prompt_weight)*outputs+self.prompt_weight*prompt_y
                 
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
                 main_loss = criterion(outputs, batch_y)
@@ -718,35 +720,40 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                if self.Doc2Vec==False:
-                    if self.pool_type=="avg":                
-                        global_avg_pool = F.adaptive_avg_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
-                        prompt_emb=global_avg_pool.unsqueeze(-1)
-                    elif self.pool_type=="max":
-                        global_max_pool = F.adaptive_max_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
-                        prompt_emb=global_max_pool.unsqueeze(-1)
-                    elif self.pool_type=="min":
-                        global_min_pool = F.adaptive_max_pool1d(-1.0*prompt_emb.transpose(1, 2), 1).squeeze(2)
-                        prompt_emb=global_min_pool.unsqueeze(-1)
-                    elif self.pool_type == "attention":
+                
+                if self.args.model != 'ChimeraTransformer':
+                    if self.Doc2Vec==False:
+                        if self.pool_type=="avg":                
+                            global_avg_pool = F.adaptive_avg_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
+                            prompt_emb=global_avg_pool.unsqueeze(-1)
+                        elif self.pool_type=="max":
+                            global_max_pool = F.adaptive_max_pool1d(prompt_emb.transpose(1, 2), 1).squeeze(2)
+                            prompt_emb=global_max_pool.unsqueeze(-1)
+                        elif self.pool_type=="min":
+                            global_min_pool = F.adaptive_max_pool1d(-1.0*prompt_emb.transpose(1, 2), 1).squeeze(2)
+                            prompt_emb=global_min_pool.unsqueeze(-1)
+                        elif self.pool_type == "attention":
 
-                        outputs_reshaped = outputs#.transpose(1, 2)  
-                        outputs_norm = F.normalize(outputs_reshaped, p=2, dim=1)
-                        prompt_emb_norm = F.normalize(prompt_emb, p=2, dim=2)
-                        attention_scores = torch.bmm(prompt_emb_norm, outputs_norm) 
-                        attention_weights = F.softmax(attention_scores, dim=1)  
- 
-                        weighted_prompt_emb = torch.sum(prompt_emb * attention_weights, dim=1)  
+                            outputs_reshaped = outputs#.transpose(1, 2)  
+                            outputs_norm = F.normalize(outputs_reshaped, p=2, dim=1)
+                            prompt_emb_norm = F.normalize(prompt_emb, p=2, dim=2)
+                            attention_scores = torch.bmm(prompt_emb_norm, outputs_norm) 
+                            attention_weights = F.softmax(attention_scores, dim=1)  
+    
+                            weighted_prompt_emb = torch.sum(prompt_emb * attention_weights, dim=1)  
 
-                        prompt_emb = weighted_prompt_emb.unsqueeze(-1)  
-                #0523
-                else:
-                    prompt_emb=prompt_emb.unsqueeze(-1)
-                prompt_y=norm(prompt_emb)+prior_y
-                outputs=(1-self.prompt_weight)*outputs+self.prompt_weight*prompt_y
-                f_dim = -1 if self.args.features == 'MS' else 0
-                outputs = outputs[:, -self.args.pred_len:, :]
-                outputs=(1-self.prompt_weight)*outputs+self.prompt_weight*prompt_y
+                            prompt_emb = weighted_prompt_emb.unsqueeze(-1)  
+                    #0523
+                    else:
+                        prompt_emb=prompt_emb.unsqueeze(-1)
+                    prompt_y=norm(prompt_emb)+prior_y
+                    outputs=(1-self.prompt_weight)*outputs+self.prompt_weight*prompt_y
+                    
+                # From old code that looks repeated
+                # f_dim = -1 if self.args.features == 'MS' else 0
+                # outputs = outputs[:, -self.args.pred_len:, :]
+                # outputs=(1-self.prompt_weight)*outputs+self.prompt_weight*prompt_y
+                
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
                 outputs = outputs.detach().cpu().numpy()
                 batch_y = batch_y.detach().cpu().numpy()
