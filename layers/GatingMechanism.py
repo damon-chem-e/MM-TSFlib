@@ -10,25 +10,25 @@ class FeatureGate(nn.Module):
     and computes a gate value to combine with original time series features.
     
     Options for gate computation (`gate_type`):
-    - 'mlp': Original two-layer MLP gate network. Computes gate $$ \alpha \in [0, 1]^{B \times L \times d_t} $$.
+    - 'mlp': Original two-layer MLP gate network. Computes gate $$ \alpha \in [0, 1]^{B \times V \times d_t} $$.
             $$ 
             \alpha = \sigma(W_{g2} \cdot \text{ReLU}(W_{g1} C + b_{g1}) + b_{g2}) 
             $$
             
     - 'linear': Simple adaptive gate (alpha) using one linear layer on concatenated features. 
-            Computes gate $$ \alpha \in [0, 1]^{B \times L \times d_t} $$.
+            Computes gate $$ \alpha \in [0, 1]^{B \times V \times d_t} $$.
             $$
             \alpha = \sigma(W_g C + b_g)
             $$
             
     - 'linear_norm': Lightweight linear gate using LayerNorm.
-            Computes gate $$ \alpha \in [0, 1]^{B \times L \times d_t} $$.
+            Computes gate $$ \alpha \in [0, 1]^{B \times V \times d_t} $$.
             $$
             \alpha = \sigma(\text{LayerNorm}(W_g C + b_g))
             $$
             
     - 'per_token_scalar': Linear gate producing one scalar per token.
-            Computes gate $$ \alpha \in [0, 1]^{B \times L \times 1} $$.
+            Computes gate $$ \alpha \in [0, 1]^{B \times V \times 1} $$.
             $$
             \alpha = \sigma (W_g C + b_g)
             $$
@@ -43,13 +43,13 @@ class FeatureGate(nn.Module):
     def __init__(self, fused_dim, ts_dim, gate_type='per_token_scalar', hidden_dim=None):
         """
         Inputs:
-        - **Fused Latent Features**: $$ F \in \mathbb{R}^{B \times L \times d_f} $$, the output of the cross-attention mechanism (potentially after post-fusion self-attention), where $$ d_f $$ is `latent_dim`.
-        - **Time Series Features**: $$ T \in \mathbb{R}^{B \times L \times d_t} $$, the output of the iTransformer encoder, where $$ d_t $$ is `d_model`.
+        - **Fused Latent Features**: $$ F \in \mathbb{R}^{B \times V \times d_f} $$, the output of the cross-attention mechanism (potentially after post-fusion self-attention), where $$ d_f $$ is `latent_dim`.
+        - **Time Series Features**: $$ T \in \mathbb{R}^{B \times V \times d_t} $$, the output of the iTransformer encoder, where $$ d_t $$ is `d_model`.
         - **Hidden Dimension**: $$ d_h $$, typically `gate_hidden_dim` (defaulting to $$ 2 \times d_t $$), used only for the `mlp` gate.
         - **Batch size**: $$ B $$
-        - **Sequence Length**: $$ L $$
+        - **Variate dimension**: $$ V $$
         
-        The fused features $$ F $$ are projected to $$ F' \in \mathbb{R}^{B \times L \times d_t} $$:
+        The fused features $$ F $$ are projected to $$ F' \in \mathbb{R}^{B \times V \times d_t} $$:
         $$
         F' = \text{FusedProjection}(F) = W_{p2} \cdot \text{ReLU}(W_{p1} F + b_{p1}) + b_{p2}
         $$
@@ -137,7 +137,7 @@ class FeatureGate(nn.Module):
             gate_value = self.gate_network(concat_features)
         
         # Apply the gate to the time series features and fused projected features
-        # Final gated output $$ O \in \mathbb{R}^{B \times L \times d_t} $$ same for all gates
+        # Final gated output $$ O \in \mathbb{R}^{B \times V \times d_t} $$ same for all gates
         
         # $$ O = \alpha \odot T + (1 - \alpha) \odot F' $$
         gated_output = gate_value * ts_features + (1 - gate_value) * projected_fused

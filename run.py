@@ -46,6 +46,32 @@ if __name__ == '__main__':
     parser.add_argument('--seasonal_patterns', type=str, default='Monthly', help='subset for M4')
     parser.add_argument('--inverse', action='store_true', help='inverse output data', default=False)
 
+    # Multimodal Fusion
+    parser.add_argument('--gate_type', type=str,
+                        choices=['mlp', 'linear', 'linear_norm', 'per_token_scalar', 'global_scalar'],
+                        default='per_token_scalar',
+                        help='Gate type to use for multimodal fusion')
+    parser.add_argument('--gate_hidden_dim', type=int, default=None,
+                        help='Hidden dimension for the gate when --gate_type is "mlp" (optional)')
+    parser.add_argument('--gate_regularization_lambda', type=float, default=0.0,
+                        help='L2 regularization strength applied to gate parameters')
+
+    # Chimera attention / Encoders
+    parser.add_argument('--num_layers', type=int, default=2,
+                        help='Number of iTransformer encoder layers')
+    parser.add_argument('--num_layers_llm', type=int, default=2,
+                        help='Number of layers in the text self-attention encoder')
+    parser.add_argument('--d_llm', type=int, default=768,
+                        help='Model dimension used in the text self-attention encoder') # LLama7b:4096; GPT2-small:768; BERT-base:768
+    parser.add_argument('--d_latent', type=int, default=512,
+                        help='Latent dimension for cross-attention')
+    parser.add_argument('--fusion_heads', type=int, default=4,
+                        help='Number of heads in the cross-attention block')
+    parser.add_argument('--post_fusion_layers', type=int, default=2,
+                        help='Number of post-fusion attention layers')
+    parser.add_argument('--final_layers', type=int, default=2,
+                        help='Number of final self-attention layers')
+
     # inputation task
     parser.add_argument('--mask_rate', type=float, default=0.25, help='mask ratio')
 

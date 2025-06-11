@@ -517,47 +517,47 @@ class FeatureGate(nn.Module):
 
 This section provides the mathematical details for the different gating mechanisms available via the `--gate_type` argument. Let's define the inputs:
 
-- **Fused Latent Features**: $ F \in \mathbb{R}^{B \times L \times d_f} $, the output of the cross-attention mechanism (potentially after post-fusion self-attention), where $ d_f $ is `latent_dim`.
-- **Time Series Features**: $ T \in \mathbb{R}^{B \times L \times d_t} $, the output of the iTransformer encoder, where $ d_t $ is `d_model`.
+- **Fused Latent Features**: $ F \in \mathbb{R}^{B \times V \times d_f} $, the output of the cross-attention mechanism (potentially after post-fusion self-attention), where $ d_f $ is `d_latent`. 
+- **Time Series Features**: $ T \in \mathbb{R}^{B \times V \times d_t} $, the output of the iTransformer encoder, where $ d_t $ is `d_model`.
 - **Hidden Dimension**: $ d_h $, typically `gate_hidden_dim` (defaulting to $ 2 \times d_t $), used only for the `mlp` gate.
 - **Batch size**: $ B $
-- **Sequence Length**: $ L $
+- **Variate**: $ V $
 
 All gating mechanisms first require projecting the fused latent features $ F $ to the time series dimension $ d_t $ to enable combination.
 
 1.  **Common Projection Step**:
-    The fused features $ F $ are projected to $ F' \in \mathbb{R}^{B \times L \times d_t} $:
+    The fused features $ F $ are projected to $ F' \in \mathbb{R}^{B \times V \times d_t} $:
     $$
     F' = \text{FusedProjection}(F) = W_{p2} \cdot \text{ReLU}(W_{p1} F + b_{p1}) + b_{p2}
     $$
     where $ W_{p1} \in \mathbb{R}^{d_f \times d_h'} $, $ b_{p1} \in \mathbb{R}^{d_h'} $, $ W_{p2} \in \mathbb{R}^{d_h' \times d_t} $, $ b_{p2} \in \mathbb{R}^{d_t} $. Note that $ d_h' $ is the hidden dimension used in the projection network (defaults to $ 2 \times d_t $).
 
 2.  **Gate Value Computation**:
-    The gate value is computed based on the `gate_type` using the *pre-projection* fused features $ F $ and the time series features $ T $. Let $ C = [F, T] \in \mathbb{R}^{B \times L \times (d_f + d_t)} $ be the concatenation.
+    The gate value is computed based on the `gate_type` using the *pre-projection* fused features $ F $ and the time series features $ T $. Let $ C = [F, T] \in \mathbb{R}^{B \times V \times (d_f + d_t)} $ be the concatenation.
 
     *   **`mlp` Gate Type**:
-        A two-layer MLP computes the gate $ \alpha \in [0, 1]^{B \times L \times d_t} $:
+        A two-layer MLP computes the gate $ \alpha \in [0, 1]^{B \times V \times d_t} $:
         $$
         \alpha = \sigma(W_{g2} \cdot \text{ReLU}(W_{g1} C + b_{g1}) + b_{g2})
         $$
         where $ W_{g1} \in \mathbb{R}^{(d_f + d_t) \times d_h} $, $ b_{g1} \in \mathbb{R}^{d_h} $, $ W_{g2} \in \mathbb{R}^{d_h \times d_t} $, $ b_{g2} \in \mathbb{R}^{d_t} $.
 
     *   **`linear` Gate Type**:
-        A single linear layer computes the gate $ \alpha \in [0, 1]^{B \times L \times d_t} $:
+        A single linear layer computes the gate $ \alpha \in [0, 1]^{B \times V \times d_t} $:
         $$
         \alpha = \sigma(W_g C + b_g)
         $$
         where $ W_g \in \mathbb{R}^{(d_f + d_t) \times d_t} $, $ b_g \in \mathbb{R}^{d_t} $.
 
     *   **`linear_norm` Gate Type**:
-        A single linear layer followed by Layer Normalization computes the gate $ \alpha \in [0, 1]^{B \times L \times d_t} $:
+        A single linear layer followed by Layer Normalization computes the gate $ \alpha \in [0, 1]^{B \times V \times d_t} $:
         $$
         \alpha = \sigma(\text{LayerNorm}(W_g C + b_g))
         $$
         where $ W_g \in \mathbb{R}^{(d_f + d_t) \times d_t} $, $ b_g \in \mathbb{R}^{d_t} $.
 
     *   **`per_token_scalar` Gate Type**: 
-        A simple linear layer that comuptes a gate with one scalar per time step/token. More interpretable, we know exactly when the model switches from weighing text vs. TS more highly. Computes gate $\alpha \in [0, 1]^{B \times L \times 1}$
+        A simple linear layer that comuptes a gate with one scalar per time step/token. More interpretable, we know exactly when the model switches from weighing text vs. TS more highly. Computes gate $\alpha \in [0, 1]^{B \times V \times 1}$
         $$
         \alpha = \sigma (W_g C + b_g)
         $$
@@ -570,7 +570,7 @@ All gating mechanisms first require projecting the fused latent features $ F $ t
         $$
         where $W_b \in \mathbb{R}^{(d_f + d_t)\times 1}, b_g \in \mathbb{R}^{1}, \bar C = \text{Mean}_L [C] $.
 
-3.  **Final Gated Output** ($ O \in \mathbb{R}^{B \times L \times d_t} $):
+3.  **Final Gated Output** ($ O \in \mathbb{R}^{B \times V \times d_t} $):
     The final output $ O $ is computed and shaped the same for all gate types:
 
     *   The gate weights the time series features $T$:

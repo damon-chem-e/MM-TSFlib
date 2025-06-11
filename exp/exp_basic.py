@@ -31,7 +31,7 @@ class Exp_Basic(object):
             'TimeMixer': TimeMixer,
             'TSMixer': TSMixer,
             'SegRNN': SegRNN,
-            'Chimera': ChimeraTransformer
+            'ChimeraTransformer': ChimeraTransformer
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)

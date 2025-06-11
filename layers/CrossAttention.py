@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import math
 
 class MultiheadLatentAttention(nn.Module):
     """
@@ -11,11 +10,11 @@ class MultiheadLatentAttention(nn.Module):
     with different dimensions.
     
     In the Chimera model:
-    - Queries come from the text features
-    - Keys and values come from the iTransformer output
+    - Queries come from the iTransformer output
+    - Keys and values come from the text features
     """
     def __init__(self, query_dim, key_dim, latent_dim, num_heads=8, dropout=0.1):
-        super(MultiheadLatentAttention, self).__init__()
+        super().__init__()
         self.num_heads = num_heads
         self.latent_dim = latent_dim
         self.head_dim = latent_dim // num_heads
@@ -36,10 +35,10 @@ class MultiheadLatentAttention(nn.Module):
         Perform cross-attention in latent space
         
         Args:
-            queries: Tensor from text branch (B, L_q, query_dim)
-            keys: Tensor from time series branch (B, L_k, key_dim)
-            values: Tensor from time series branch (B, L_v, key_dim)
-            attention_mask: Optional mask for attention
+            queries: Tensor from time series branch (B, L_q, query_dim)
+            keys: Tensor from text branch (B, L_k, key_dim)
+            values: Tensor from text branch (B, L_v, key_dim)
+            Where L_q, L_k, and L_v are the sequence lengths for their respective tensors
             
         Returns:
             Fused features in latent space (B, L_q, latent_dim)
@@ -76,4 +75,4 @@ class MultiheadLatentAttention(nn.Module):
         # Final projection
         output = self.out_proj(output)
         
-        return output
+        return output # (batch, seq_q, d_latent) where seq_q is the variate dimension

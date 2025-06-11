@@ -14,7 +14,7 @@ class Model(nn.Module):
         self.pred_len = configs.pred_len
         self.configs = configs # Store configs for helper methods
         self.gate_regularization = configs.gate_regularization_lambda > 0
-        self.training = configs.is_training
+        self.is_training = configs.is_training
         
         # Build model components 
         self._build_itransformer_components()
@@ -50,7 +50,7 @@ class Model(nn.Module):
         configs = self.configs
         self.num_layers_llm = configs.num_layers_llm
         self.text_encoder = None
-        if self.text_fusion_layers > 0:
+        if self.num_layers_llm > 0:
             self.text_encoder = Encoder(
             [
                 EncoderLayer(
@@ -71,8 +71,8 @@ class Model(nn.Module):
         configs = self.configs
         self.d_latent = configs.d_latent if hasattr(configs, 'd_latent') else min(configs.d_model, configs.d_llm)
         self.cross_attention = MultiheadLatentAttention(
-            query_dim=configs.d_llm,
-            key_dim=configs.d_model,
+            query_dim=configs.d_model,
+            key_dim=configs.d_llm,
             latent_dim=self.d_latent,
             num_heads = configs.fusion_heads if hasattr(configs, 'fusion_heads') else configs.n_heads,
             dropout=configs.dropout
@@ -103,7 +103,7 @@ class Model(nn.Module):
         """Initializes the gating mechanism based on the specific type."""
         configs = self.configs
         self.feature_gate = FeatureGate(
-            fused_dim = self.latent_dim,
+            fused_dim = self.d_latent,
             ts_dim=configs.d_model,
             gate_type=configs.gate_type,
             hidden_dim=configs.gate_hidden_dim if hasattr(configs, 'gate_hidden_dim') else 2*configs.d_model # Only used for mlp gate
@@ -148,16 +148,16 @@ class Model(nn.Module):
         
         Args:
             text_features: Features from text encoder (B, L, d_llm)
-            ts_features: Features from iTransformer (B, L, d_model)
+            ts_features: Features from iTransformer (B, V, d_model)
             
         Returns:
             fused_latent_features: Fused features in latent space (B, L, latent_dim)
         """
         # Cross-attention fusion
         fused_latent_features = self.cross_attention(
-            queries=text_features,  # Text as query
-            keys=ts_features,       # Time series as key
-            values=ts_features      # Time series as value
+            queries=ts_features,    # Time series as query
+            keys=text_features,     # Text as key
+            values=text_features    # Text as value
         )
         
         # Post-fusion self-attention if specified
@@ -221,17 +221,20 @@ class Model(nn.Module):
         dec_out = dec_out * (stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
         dec_out = dec_out + (means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
         
-        if self.gate_regularization and self.training:
+        if self.gate_regularization and self.is_training:
             return dec_out, gate_value
         else:
             return dec_out
         
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings=None, mask=None):
         # Long term forecasting task
-        if self.gate_regularization and self.training:
-            dec_out, gate_value = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings)
-            return dec_out, gate_value # Return gate for regularization loss
+        # if self.gate_regularization:
+        #     dec_out, gate_value = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings)
+        #     return dec
+        # else:
+        #     dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings)
         
-        # Fallback or error for unsupported task
-        return None
+        # return dec_out, gate_value # Return gate for regularization loss
+    
+        return self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings)
     
