@@ -5,3 +5,4 @@ __pycache__/
 *.pth
 test_results/
 results/
+checkpoints/

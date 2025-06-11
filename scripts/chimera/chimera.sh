@@ -18,12 +18,15 @@ do
       model_id=$(basename ${root_path})  
       echo "Running model ChimeraTransformer with pred_len $pred_len"
       python -u run.py \
+        --model ChimeraTransformer \
+        --ts_only 0 \
+        --num_layers_llm 4 \
+        --final_layers 4 \
         --task_name long_term_forecast \
         --is_training 1 \
         --root_path $root_path \
         --data_path $data_path \
         --model_id ${model_id}_${pred_len} \
-        --model ChimeraTransformer \
         --train_epochs 10 \
         --data custom \
         --features M \

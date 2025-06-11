@@ -181,8 +181,8 @@ class Model(nn.Module):
             fused_latent_features, ts_features
         )
         return gated_output, gate_value
-    
-    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings=None):
+        
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings=None, mask=None):
         gate_value = None # Initialize gate value
         
         # Normalization from Non-stationary Transformer
@@ -222,16 +222,30 @@ class Model(nn.Module):
         dec_out = dec_out + (means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
         
         return dec_out, gate_value
-        
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings=None, mask=None):
-        # Long term forecasting task
-        # if self.gate_regularization:
-        #     dec_out, gate_value = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings)
-        #     return dec
-        # else:
-        #     dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings)
-        
-        # return dec_out, gate_value # Return gate for regularization loss
     
-        return self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings)
+    def forward_ts(self, x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings=None, mask=None):
+        """
+        Forward to train only time series leg. No text and no gating.
+        """
+        # Normalization from Non-stationary Transformer
+        means = x_enc.mean(1, keepdim=True).detach()
+        x_enc = x_enc - means
+        stdev = torch.sqrt(torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5)
+        x_enc /= stdev
+
+        _, _, N = x_enc.shape
+
+        # Time series embedding and encoding
+        enc_out = self.enc_embedding(x_enc, x_mark_enc)
+        ts_features, _ = self.encoder(enc_out, attn_mask=None)
+        final_features = ts_features
+        
+        # Task-specific prediction
+        dec_out = self.projection(final_features).permute(0, 2, 1)[:, :, :N]
+        
+        # De-Normalization from Non-stationary Transformer
+        dec_out = dec_out * (stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
+        dec_out = dec_out + (means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
+        
+        return dec_out
     

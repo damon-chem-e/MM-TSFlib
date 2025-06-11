@@ -4,6 +4,7 @@
 
 - `--is_training`: Boolean flag (0 or 1) indicating whether to train the model (1) or run inference only (0)
 - `--model_id`: Unique identifier for the model, used for saving checkpoints and results
+- `--ts_only`: Boolean flag indicating whether to train time series leg only (1) or entire model (0)
 
 ### Multimodal Fusion Parameters
 - `--gate_type`: Gate type to use ('mlp', 'linear', 'linear_norm', 'per_token_scalar', 'global_scalar')
@@ -47,7 +48,7 @@ Final attention layers
 
 Parameters shared among several attention blocks
 
-- `--d_ff`: Dim of feedforward for encoers
+- `--d_ff`: Dim of feedforward for encoders
 - `--dropout`: Dropout for encoders/attentions
 - `--n_heads`: Number of attention heads
 - `--activation`: 'relu' or 'gelu'
