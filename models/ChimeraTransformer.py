@@ -221,10 +221,7 @@ class Model(nn.Module):
         dec_out = dec_out * (stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
         dec_out = dec_out + (means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
         
-        if self.gate_regularization and self.is_training:
-            return dec_out, gate_value
-        else:
-            return dec_out
+        return dec_out, gate_value
         
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings=None, mask=None):
         # Long term forecasting task

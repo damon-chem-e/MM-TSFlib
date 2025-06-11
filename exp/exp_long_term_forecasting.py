@@ -389,6 +389,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def _select_criterion(self):
         criterion = nn.MSELoss()
         return criterion
+    
+    # TODO: This doesn't make sense
     def _calculate_gate_regularization_loss(self, gate_value):
         """Calculates L1 regularization loss for the gate."""
         if gate_value is None or self.args.gate_regularization_lambda <= 0:
@@ -431,7 +433,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 
                 if self.args.model == 'ChimeraTransformer':
-                    outputs = self.model(batch_x, batch_x_mark, 
+                    outputs, _ = self.model(batch_x, batch_x_mark, 
                                   batch_y[:, :self.args.label_len, :], 
                                   batch_y_mark[:, :self.args.label_len, :], 
                                   prompt_embeddings)
@@ -505,6 +507,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
 
+        gates = []
+        last_gate = None
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
@@ -553,16 +557,10 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 gate_value = None
                 
                 if self.args.model == 'ChimeraTransformer':
-                    if self.args.gate_regularization_lambda > 0 and self.model.training:
-                        outputs, gate_value = self.model(batch_x, batch_x_mark, 
-                                                          batch_y[:, :self.args.label_len, :], 
-                                                          batch_y_mark[:, :self.args.label_len, :], 
-                                                          prompt_embeddings)
-                    else:
-                        outputs = self.model(batch_x, batch_x_mark, 
-                                             batch_y[:, :self.args.label_len, :], 
-                                             batch_y_mark[:, :self.args.label_len, :], 
-                                             prompt_embeddings)
+                    outputs, gate_value = self.model(batch_x, batch_x_mark, 
+                                                        batch_y[:, :self.args.label_len, :], 
+                                                        batch_y_mark[:, :self.args.label_len, :], 
+                                                        prompt_embeddings)
                 else:
                     # Existing forward pass for other models
                     if self.args.output_attention:
@@ -609,9 +607,10 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 total_loss = main_loss + reg_loss
                 
                 train_loss.append(total_loss.item())
+                last_gate = gate_value
 
                 if (i + 1) % 100 == 0:
-                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
+                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, total_loss.item()))
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
                     print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
@@ -628,6 +627,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     model_optim_mlp.step()
                     model_optim_proj.step()
 
+            gates.append(last_gate)
+
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
             vali_loss = self.vali(vali_data, vali_loader, criterion)
@@ -642,6 +643,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
             #adjust_learning_rate(model_optim, epoch + 1, self.args)
 
+        # Save gates at each checkpoint
+        if self.args.model == 'ChimeraTransformer':
+            folder_path = './results/' + setting + '/'
+            if not os.path.exists(folder_path):
+                os.makedirs(folder_path)
+                
+            torch.save(gates, folder_path + '/gates.pt')
+        
         best_model_path = path + '/' + 'checkpoint.pth'
         self.model.load_state_dict(torch.load(best_model_path))
 
@@ -696,7 +705,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 
                 if self.args.model == 'ChimeraTransformer':
-                    outputs = self.model(batch_x, batch_x_mark, 
+                    outputs, _ = self.model(batch_x, batch_x_mark, 
                                   batch_y[:, :self.args.label_len, :], 
                                   batch_y_mark[:, :self.args.label_len, :], 
                                   prompt_embeddings)
@@ -765,10 +774,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         preds = np.array(preds)
         trues = np.array(trues)
-        print('test shape:', preds.shape, trues.shape)
         preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
         trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
-        print('test shape:', preds.shape, trues.shape)
 
         # result save
         folder_path = './results/' + setting + '/'

@@ -2,7 +2,8 @@ export CUDA_VISIBLE_DEVICES=0
 
 root_paths=("./data/Public_Health")
 data_paths=("US_FLURATIO_Week.csv") 
-pred_lengths=(12 24 36 48)
+# pred_lengths=(12 24 36 48)
+pred_lengths=(12)
 seeds=(2021)
 use_fullmodel=0
 length=${#root_paths[@]}
@@ -21,8 +22,9 @@ do
         --is_training 1 \
         --root_path $root_path \
         --data_path $data_path \
-        --model_id ${model_id}_${prompt_weight}_${pred_len} \
+        --model_id ${model_id}_${pred_len} \
         --model ChimeraTransformer \
+        --train_epochs 10 \
         --data custom \
         --features M \
         --seq_len 24 \
@@ -32,8 +34,6 @@ do
         --seed $seed \
         --type_tag "#F#" \
         --text_len 4 \
-        --prompt_weight 0.3 \
-        --pool_type "avg" \
         --save_name "results/result_chimera_test.txt" \
         --llm_model GPT2 \
         --huggingface_token 'NA'\
