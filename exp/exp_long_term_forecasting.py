@@ -365,17 +365,21 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         
         # If we want to train chimera without training the time series leg
         if self.args.model == 'ChimeraTransformer' and not self.args.ts_only:
-            ckpt = torch.load('checkpoints/ts_leg/ts_encoder.pt')
-            self.model.enc_embedding.load_state_dict(ckpt["enc_embedding"])
-            self.model.encoder.load_state_dict(ckpt["encoder"])
             
-            # Freeze encoder/embeddings
-            print("Now freezing Chimera TS embeddings and encoder.")
-            for p in self.model.enc_embedding.parameters():
-                p.requires_grad = False
+            if self.args.load_ts:
+                print("Now loading Chimera TS embeddings and encoder.")
+                ckpt = torch.load(self.args.ts_path)
+                self.model.enc_embedding.load_state_dict(ckpt["enc_embedding"])
+                self.model.encoder.load_state_dict(ckpt["encoder"])
             
-            for p in self.model.encoder.parameters():
-                p.requires_grad = False
+            if self.args.freeze_ts:
+                # Freeze encoder/embeddings
+                print("Now freezing Chimera TS embeddings and encoder.")
+                for p in self.model.enc_embedding.parameters():
+                    p.requires_grad = False
+                
+                for p in self.model.encoder.parameters():
+                    p.requires_grad = False
                 
         
     def _build_model(self):
@@ -406,12 +410,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         criterion = nn.MSELoss()
         return criterion
     
-    # TODO: This doesn't make sense
     def _calculate_gate_regularization_loss(self, gate_value):
         """Calculates L1 regularization loss for the gate."""
         if gate_value is None or self.args.gate_regularization_lambda <= 0:
             return 0.0
-        # L1 penalty pushing gate towards 0 or 1 (away from 0.5)
+        # L1 penalty pushing gate towards 0.5
         reg_loss = torch.mean(torch.abs(gate_value - 0.5))
         return self.args.gate_regularization_lambda * reg_loss
 
@@ -685,7 +688,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     'enc_embedding': self.model.enc_embedding.state_dict(),
                     'encoder': self.model.encoder.state_dict()
                 },
-                'checkpoints/ts_leg/ts_encoder.pt'
+                self.args.ts_path
             )
 
         return self.model

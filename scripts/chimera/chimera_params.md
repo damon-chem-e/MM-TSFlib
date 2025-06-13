@@ -5,6 +5,9 @@
 - `--is_training`: Boolean flag (0 or 1) indicating whether to train the model (1) or run inference only (0)
 - `--model_id`: Unique identifier for the model, used for saving checkpoints and results
 - `--ts_only`: Boolean flag indicating whether to train time series leg only (1) or entire model (0)
+- `--freeze_ts`: Boolean flag to freeze time series leg (1) or train it (0)
+- `--load_ts`: Boolean flag on whether to load time series from path (1) or random init (0)
+- `--ts_path`: Path to saved .pt file if `load_ts` is 1.
 
 ### Multimodal Fusion Parameters
 - `--gate_type`: Gate type to use ('mlp', 'linear', 'linear_norm', 'per_token_scalar', 'global_scalar')
