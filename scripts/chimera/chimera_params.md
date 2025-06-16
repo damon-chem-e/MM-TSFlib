@@ -8,6 +8,7 @@
 - `--freeze_ts`: Boolean flag to freeze time series leg (1) or train it (0)
 - `--load_ts`: Boolean flag on whether to load time series from path (1) or random init (0)
 - `--ts_path`: Path to saved .pt file if `load_ts` is 1.
+- `--architecture`: Architecture type which mainly alters skip/residual connections. ('post_attn_skip', 'raw_skip', 'raw_skip_dual_gate')
 
 ### Multimodal Fusion Parameters
 - `--gate_type`: Gate type to use ('mlp', 'linear', 'linear_norm', 'per_token_scalar', 'global_scalar')

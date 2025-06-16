@@ -15,6 +15,10 @@ class Model(nn.Module):
         self.configs = configs # Store configs for helper methods
         self.gate_regularization = configs.gate_regularization_lambda > 0
         self.is_training = configs.is_training
+        self.architecture = configs.architecture
+        
+        if self.architecture == 'raw_skip_dual_gate':
+            assert self.configs.final_layers >= 0, "To use raw_skip_dual_gate, there must be at least 1 final_layers!"
         
         # Build model components 
         self._build_itransformer_components()
@@ -103,11 +107,19 @@ class Model(nn.Module):
         """Initializes the gating mechanism based on the specific type."""
         configs = self.configs
         self.feature_gate = FeatureGate(
-            fused_dim = self.d_latent,
+            fused_dim=self.d_latent,
             ts_dim=configs.d_model,
             gate_type=configs.gate_type,
             hidden_dim=configs.gate_hidden_dim if hasattr(configs, 'gate_hidden_dim') else 2*configs.d_model # Only used for mlp gate
         )
+        
+        if configs.architecture == 'raw_skip_dual_gate':
+            self.final_feature_gate = FeatureGate(
+                fused_dim=configs.d_model,
+                ts_dim=configs.d_model,
+                gate_type=configs.gate_type,
+                hidden_dim=configs.gate_hidden_dim if hasattr(configs, 'gate_hidden_dim') else 2*configs.d_model # Only used for mlp gate
+            )
         
     def _build_final_layers(self):
         """Initializes the optional final self-attention layers after gating."""
@@ -165,22 +177,6 @@ class Model(nn.Module):
             fused_latent_features, _ = self.post_fusion_encoder(fused_latent_features, attn_mask=None)
             
         return fused_latent_features
-    
-    def forward_gating_fusion(self, fused_latent_features, ts_features):
-        """Apply gating mechanism to control fusion strength.
-        
-        Args:
-            fused_latent_features: Features from cross-attention/post-fusion (B, L, latent_dim)
-            ts_features: Original time series features from iTransformer (B, L, d_model)
-            
-        Returns:
-            gated_output: Combined features in time series dimension (B, L, d_model)
-            gate_value: The computed gate (G or alpha) for potential regularization (B, L, d_model)
-        """
-        gated_output, gate_value = self.feature_gate(
-            fused_latent_features, ts_features
-        )
-        return gated_output, gate_value
         
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings=None, mask=None):
         gate_value = None # Initialize gate value
@@ -198,6 +194,7 @@ class Model(nn.Module):
         ts_features, _ = self.encoder(enc_out, attn_mask=None)
         
         # Process text if available for multimodal fusion
+        final_gate_value = None
         if text_embeddings is not None:
             # Text processing
             text_features = self.forward_text_encoder(text_embeddings)
@@ -206,11 +203,17 @@ class Model(nn.Module):
             fused_latent_features = self.forward_fusion_and_post_process(text_features, ts_features)
             
             # Gated fusion with time series features (includes dimension projection)
-            final_features, gate_value = self.forward_gating_fusion(fused_latent_features, ts_features)
+            if self.architecture == 'post_attn_skip':
+                final_features, gate_value = self.feature_gate(fused_latent_features, ts_features)
+            if self.architecture in ['raw_skip', 'raw_skip_dual_gate']:
+                final_features, gate_value = self.feature_gate(fused_latent_features, enc_out)
             
             # Final transformer layers if specified
             if self.final_encoder is not None:
                 final_features, _ = self.final_encoder(final_features, attn_mask=None)
+                
+                if self.architecture == 'raw_skip_dual_gate':   
+                    final_features, final_gate_value = self.final_feature_gate(final_features, enc_out)
         else:
             final_features = ts_features
         
@@ -221,7 +224,7 @@ class Model(nn.Module):
         dec_out = dec_out * (stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
         dec_out = dec_out + (means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
         
-        return dec_out, gate_value
+        return dec_out, gate_value, final_gate_value
     
     def forward_ts(self, x_enc, x_mark_enc, x_dec, x_mark_dec, text_embeddings=None, mask=None):
         """

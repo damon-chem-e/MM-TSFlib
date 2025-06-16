@@ -3,7 +3,7 @@ export CUDA_VISIBLE_DEVICES=0
 root_paths=("./data/Public_Health")
 data_paths=("US_FLURATIO_Week.csv") 
 # pred_lengths=(12 24 36 48)
-pred_lengths=(12)
+pred_lengths=(24)
 seeds=(2021)
 use_fullmodel=0
 length=${#root_paths[@]}
@@ -25,6 +25,7 @@ do
         --task_name long_term_forecast \
         --is_training 1 \
         --gate_type linear_norm \
+        --architecture raw_skip \
         --gate_regularization_lambda 0.0 \
         --n_heads 12 \
         --d_latent 516 \
@@ -39,14 +40,12 @@ do
         --train_epochs 10 \
         --data custom \
         --features M \
-        --seq_len 24 \
-        --label_len 12 \
         --pred_len $pred_len \
         --des 'Exp' \
         --seed $seed \
         --type_tag "#F#" \
         --text_len 4 \
-        --save_name "results/result_chimera_test.txt" \
+        --save_name "results/architecture_test.txt" \
         --llm_model GPT2 \
         --huggingface_token 'NA'\
         --use_fullmodel $use_fullmodel

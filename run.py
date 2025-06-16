@@ -58,7 +58,9 @@ if __name__ == '__main__':
     parser.add_argument('--gate_hidden_dim', type=int, default=None,
                         help='Hidden dimension for the gate when --gate_type is "mlp" (optional)')
     parser.add_argument('--gate_regularization_lambda', type=float, default=0.0,
-                        help='L2 regularization strength applied to gate parameters')
+                        help='L1 regularization strength applied to gate parameters')
+    parser.add_argument('--architecture', type=str, default='post_attn_skip',
+                        help='Architecture type which mainly alters skip/residual connections. (post_attn_skip, raw_skip, raw_skip_dual_gate)')
 
     # Chimera attention / Encoders
     parser.add_argument('--num_layers', type=int, default=2,
@@ -231,10 +233,11 @@ if __name__ == '__main__':
         for ii in range(args.itr):
             # setting record of experiments
             exp = Exp(args)  # set experiments
-            setting = "{}_{}_{}".format(
+            setting = "{}_{}_{}_{}".format(
                 args.task_name,
                 args.model,
                 args.model_id,
+                args.architecture
             )
             # setting = '{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_expand{}_dc{}_fc{}_eb{}_dt{}_{}_{}'.format(
             #     args.task_name,
@@ -265,10 +268,11 @@ if __name__ == '__main__':
             torch.cuda.empty_cache()
     else:
         ii = 0
-        setting = "{}_{}_{}".format(
+        setting = "{}_{}_{}_{}".format(
                 args.task_name,
                 args.model,
                 args.model_id,
+                args.architecture
             )
         # setting = '{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_expand{}_dc{}_fc{}_eb{}_dt{}_{}_{}'.format(
         #     args.task_name,

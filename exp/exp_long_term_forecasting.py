@@ -50,7 +50,12 @@ warnings.filterwarnings('ignore')
 
 class Exp_Long_Term_Forecast(Exp_Basic):
     def __init__(self, args):
+        if args.model == 'ChimeraTransformer':
+            args.seq_len = 2 * args.pred_len
+            args.label_len = args.pred_len
+            
         super(Exp_Long_Term_Forecast, self).__init__(args)
+        
         configs=args
         self.text_path=configs.text_path
         self.prompt_weight=configs.prompt_weight
@@ -65,6 +70,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         self.hug_token=configs.huggingface_token
         mlp_sizes=[self.d_llm,int(self.d_llm/8),self.text_embedding_dim]
         self.Doc2Vec=False
+            
         if mlp_sizes is not None:
             self.mlp = MLP(mlp_sizes,dropout_rate=0.3)
         else:
@@ -452,7 +458,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 
                 if self.args.model == 'ChimeraTransformer':
-                    outputs, _ = self.model(batch_x, batch_x_mark, 
+                    outputs, _, _ = self.model(batch_x, batch_x_mark, 
                                   batch_y[:, :self.args.label_len, :], 
                                   batch_y_mark[:, :self.args.label_len, :], 
                                   prompt_embeddings)
@@ -576,13 +582,20 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 # Forward pass
                 outputs = None
                 gate_value = None
+                final_gate_value = None
                 
                 if self.args.model == 'ChimeraTransformer':
                     if not self.args.ts_only: # Whole chimera
-                        outputs, gate_value = self.model(batch_x, batch_x_mark, 
-                                                            batch_y[:, :self.args.label_len, :], 
-                                                            batch_y_mark[:, :self.args.label_len, :], 
-                                                            prompt_embeddings)
+                        if self.args.architecture == 'raw_skip_dual_gate':
+                            outputs, gate_value, final_gate_value = self.model(batch_x, batch_x_mark, 
+                                                                batch_y[:, :self.args.label_len, :], 
+                                                                batch_y_mark[:, :self.args.label_len, :], 
+                                                                prompt_embeddings)
+                        else:
+                            outputs, gate_value, _ = self.model(batch_x, batch_x_mark, 
+                                                                batch_y[:, :self.args.label_len, :], 
+                                                                batch_y_mark[:, :self.args.label_len, :], 
+                                                                prompt_embeddings)
                     else: # Time series leg only, no gates
                         outputs = self.model.forward_ts(batch_x, batch_x_mark, 
                                                             batch_y[:, :self.args.label_len, :], 
@@ -632,9 +645,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 # Add gate regularization loss if applicable
                 reg_loss = self._calculate_gate_regularization_loss(gate_value)
                 total_loss = main_loss + reg_loss
+                if self.args.architecture == 'raw_skip_dual_gate':
+                    reg_loss_final_gate = self._calculate_gate_regularization_loss(final_gate_value)
+                    total_loss += reg_loss_final_gate
                 
                 train_loss.append(total_loss.item())
-                last_gate = gate_value
+                last_gate = (gate_value, final_gate_value)
+
 
                 if (i + 1) % 100 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, total_loss.item()))
@@ -742,7 +759,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 
                 if self.args.model == 'ChimeraTransformer':
-                    outputs, _ = self.model(batch_x, batch_x_mark, 
+                    outputs, _, _ = self.model(batch_x, batch_x_mark, 
                                   batch_y[:, :self.args.label_len, :], 
                                   batch_y_mark[:, :self.args.label_len, :], 
                                   prompt_embeddings)
