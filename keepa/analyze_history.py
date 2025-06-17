@@ -14,9 +14,16 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 def load_history(file_path: Path) -> dict:
-    """Load price history from JSON file."""
+    """Load price history from JSON file. Handles both single product and batch formats."""
     with open(file_path) as f:
-        return json.load(f)
+        data = json.load(f)
+        if "products" in data:
+            return data
+        elif "asin" in data and "csv" in data:
+            # Wrap single product object for compatibility
+            return {"products": [data]}
+        else:
+            raise ValueError(f"Unrecognized file format in {file_path}")
 
 def parse_price_history(history_data: dict) -> pd.DataFrame:
     """
@@ -121,24 +128,24 @@ def analyze_product(file_path: Path, figures_dir: Path) -> None:
 
 
 def main():
-    """Analyze all price history files in the data directory."""
+    """Analyze all price history files in the products directory."""
     script_dir = Path(__file__).parent
-    data_dir = script_dir / "data"
+    products_dir = script_dir / "data" / "products"
     figures_dir = script_dir / "figures"
     figures_dir.mkdir(exist_ok=True)
     
     console.print("[bold]Keepa Price History Analyzer[/bold]", style="underline2 blue")
-    console.print(f"Looking for JSON files in: [cyan]{data_dir}[/cyan]")
+    console.print(f"Looking for JSON files in: [cyan]{products_dir}[/cyan]")
     console.print(f"Saving figures to: [cyan]{figures_dir}[/cyan]\n")
     
-    if not data_dir.exists():
-        console.print(f"[bold red]Error: Data directory not found at {data_dir}[/bold red]")
+    if not products_dir.exists():
+        console.print(f"[bold red]Error: Products directory not found at {products_dir}[/bold red]")
         return
     
-    json_files = list(data_dir.glob("*_history.json"))
+    json_files = list(products_dir.glob("*.json"))
     
     if not json_files:
-        console.print("[bold red]Error: No JSON history files found![/bold red]")
+        console.print("[bold red]Error: No product JSON files found![/bold red]")
         return
     
     console.print(f"Found {len(json_files)} files to analyze.")
