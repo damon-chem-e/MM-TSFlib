@@ -4,9 +4,8 @@
 
 - `--is_training`: Boolean flag (0 or 1) indicating whether to train the model (1) or run inference only (0)
 - `--model_id`: Unique identifier for the model, used for saving checkpoints and results
-- `--ts_only`: Boolean flag indicating whether to train time series leg only (1) or entire model (0)
+- `--ts_only_epochs`: Number of epochs to train the time series only.
 - `--freeze_ts`: Boolean flag to freeze time series leg (1) or train it (0)
-- `--load_ts`: Boolean flag on whether to load time series from path (1) or random init (0)
 - `--ts_path`: Path to saved .pt file if `load_ts` is 1.
 - `--architecture`: Architecture type which mainly alters skip/residual connections. ('post_attn_skip', 'raw_skip', 'raw_skip_dual_gate')
 
@@ -63,7 +62,7 @@ Parameters shared among several attention blocks
 - `--text_len`: Maximum length of text sequences
 
 ### Training Parameters
-- `--train_epochs`: Number of training epochs
+- `--train_epochs`: Number of training epochs for entire Chimera.
 - `--batch_size`: Batch size for training
 - `--patience`: Number of epochs to wait before early stopping
 - `--learning_rate`: Learning rate for entire model training

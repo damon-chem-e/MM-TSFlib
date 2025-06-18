@@ -2,10 +2,8 @@ export CUDA_VISIBLE_DEVICES=0
 
 root_paths=("./data/Public_Health")
 data_paths=("US_FLURATIO_Week.csv") 
-# pred_lengths=(12 24 36 48)
-pred_lengths=(24)
+pred_lengths=(12 24 36 48)
 seeds=(2021)
-use_fullmodel=0
 length=${#root_paths[@]}
 for seed in "${seeds[@]}"
 do
@@ -19,8 +17,8 @@ do
       echo "Running model ChimeraTransformer with pred_len $pred_len"
       python -u run.py \
         --model ChimeraTransformer \
-        --ts_only 0 \
-        --load_ts 0 \
+        --ts_only_epochs 3 \
+        --train_epochs 7 \
         --freeze_ts 0 \
         --task_name long_term_forecast \
         --is_training 1 \
@@ -33,11 +31,11 @@ do
         --num_layers_llm 4 \
         --fusion_heads 12 \
         --post_fusion_layers 4 \
-        --final_layers 4 \
+        --final_layers 0 \
+        --use_fullmodel 0 \
         --root_path $root_path \
         --data_path $data_path \
         --model_id ${model_id}_${pred_len} \
-        --train_epochs 10 \
         --data custom \
         --features M \
         --pred_len $pred_len \
@@ -47,8 +45,7 @@ do
         --text_len 4 \
         --save_name "results/architecture_test.txt" \
         --llm_model GPT2 \
-        --huggingface_token 'NA'\
-        --use_fullmodel $use_fullmodel
+        --huggingface_token 'NA'
     done
   done
 done

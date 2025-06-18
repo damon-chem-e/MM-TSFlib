@@ -27,10 +27,8 @@ if __name__ == '__main__':
     parser.add_argument('--model_id', type=str, required=True, default='test', help='model id')
     parser.add_argument('--model', type=str, required=True, default='Autoformer',
                         help='model name, options: [Autoformer, Transformer, TimesNet]')
-    parser.add_argument('--ts_only', type=int, default=0, help='Boolean flag indicating whether to train time series leg only (1) or entire model (0)')
+    parser.add_argument('--ts_only_epochs', type=int, default=0, help='Number of epochs to train the time series only.')
     parser.add_argument('--freeze_ts', type=int, default=1, help='Boolean flag to freeze time series leg (1) or train it (0)')
-    parser.add_argument('--load_ts', type=int, default=1, help='Boolean flag on whether to load time series from path (1) or random init (0)')
-    parser.add_argument('--ts_path', type=str, default='checkpoints/ts_leg/ts_encoder.pt', help='Path to save and load saved time series leg.')
 
     # data loader
     parser.add_argument('--data', type=str, required=True, default='ETTm1', help='dataset type')
@@ -233,32 +231,18 @@ if __name__ == '__main__':
         for ii in range(args.itr):
             # setting record of experiments
             exp = Exp(args)  # set experiments
-            setting = "{}_{}_{}_{}".format(
+            setting = "{}_{}_{}_{}_{}_{}_{}_{}_{}_{}".format(
                 args.task_name,
                 args.model,
                 args.model_id,
-                args.architecture
+                args.architecture,
+                args.seed,
+                args.final_layers,
+                args.use_fullmodel,
+                args.ts_only_epochs,
+                args.train_epochs,
+                args.freeze_ts
             )
-            # setting = '{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_expand{}_dc{}_fc{}_eb{}_dt{}_{}_{}'.format(
-            #     args.task_name,
-            #     args.model_id,
-            #     args.model,
-            #     args.data,
-            #     args.features,
-            #     args.seq_len,
-            #     args.label_len,
-            #     args.pred_len,
-            #     args.d_model,
-            #     args.n_heads,
-            #     args.e_layers,
-            #     args.d_layers,
-            #     args.d_ff,
-            #     args.expand,
-            #     args.d_conv,
-            #     args.factor,
-            #     args.embed,
-            #     args.distil,
-            #     args.des, ii)
 
             print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
             exp.train(setting)
@@ -268,32 +252,18 @@ if __name__ == '__main__':
             torch.cuda.empty_cache()
     else:
         ii = 0
-        setting = "{}_{}_{}_{}".format(
+        setting = "{}_{}_{}_{}_{}_{}_{}_{}_{}_{}".format(
                 args.task_name,
                 args.model,
                 args.model_id,
-                args.architecture
+                args.architecture,
+                args.seed,
+                args.final_layers,
+                args.use_fullmodel,
+                args.ts_only_epochs,
+                args.train_epochs,
+                args.freeze_ts
             )
-        # setting = '{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_expand{}_dc{}_fc{}_eb{}_dt{}_{}_{}'.format(
-        #     args.task_name,
-        #     args.model_id,
-        #     args.model,
-        #     args.data,
-        #     args.features,
-        #     args.seq_len,
-        #     args.label_len,
-        #     args.pred_len,
-        #     args.d_model,
-        #     args.n_heads,
-        #     args.e_layers,
-        #     args.d_layers,
-        #     args.d_ff,
-        #     args.expand,
-        #     args.d_conv,
-        #     args.factor,
-        #     args.embed,
-        #     args.distil,
-        #     args.des, ii)
 
         exp = Exp(args)  # set experiments
         print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))

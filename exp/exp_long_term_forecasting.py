@@ -78,6 +78,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         mlp_sizes2=[self.text_embedding_dim+self.args.pred_len,self.args.pred_len]
         if mlp_sizes2 is not None:
             self.mlp_proj = MLP(mlp_sizes2,dropout_rate=0.3)
+            
         if configs.llm_model == 'Doc2Vec':
             print('Now using Doc2Vec')
             print("Training Doc2Vec model")
@@ -369,23 +370,22 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         self.learning_rate2=1e-2
         self.learning_rate3=1e-3
         
-        # If we want to train chimera without training the time series leg
-        if self.args.model == 'ChimeraTransformer' and not self.args.ts_only:
+        # if self.args.model == 'ChimeraTransformer' and self.args.ts_only_epochs > 0:
             
-            if self.args.load_ts:
-                print("Now loading Chimera TS embeddings and encoder.")
-                ckpt = torch.load(self.args.ts_path)
-                self.model.enc_embedding.load_state_dict(ckpt["enc_embedding"])
-                self.model.encoder.load_state_dict(ckpt["encoder"])
+        #     if self.args.load_ts:
+        #         print("Now loading Chimera TS embeddings and encoder.")
+        #         ckpt = torch.load(self.args.ts_path)
+        #         self.model.enc_embedding.load_state_dict(ckpt["enc_embedding"])
+        #         self.model.encoder.load_state_dict(ckpt["encoder"])
             
-            if self.args.freeze_ts:
-                # Freeze encoder/embeddings
-                print("Now freezing Chimera TS embeddings and encoder.")
-                for p in self.model.enc_embedding.parameters():
-                    p.requires_grad = False
+        #     if self.args.freeze_ts:
+        #         # Freeze encoder/embeddings
+        #         print("Now freezing Chimera TS embeddings and encoder.")
+        #         for p in self.model.enc_embedding.parameters():
+        #             p.requires_grad = False
                 
-                for p in self.model.encoder.parameters():
-                    p.requires_grad = False
+        #         for p in self.model.encoder.parameters():
+        #             p.requires_grad = False
                 
         
     def _build_model(self):
@@ -452,7 +452,10 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     prompt_emb =self.llm_model(inputs_embeds=prompt_embeddings).last_hidden_state
                 else:
                     prompt_emb=prompt_embeddings 
-                prompt_emb = self.mlp(prompt_emb)  # (batch, prompt_token, text_embedding_dim)
+                    
+                if self.args.model != 'ChimeraTransformer':
+                    prompt_emb = self.mlp(prompt_emb) # (batch, prompt_token, text_embedding_dim)
+                    
                 # decoder input
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
@@ -461,7 +464,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     outputs, _, _ = self.model(batch_x, batch_x_mark, 
                                   batch_y[:, :self.args.label_len, :], 
                                   batch_y_mark[:, :self.args.label_len, :], 
-                                  prompt_embeddings)
+                                  prompt_emb)
                 else:
                     # Existing forward pass for other models
                     if self.args.output_attention:
@@ -536,7 +539,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         gates = []
         last_gate = None
-        for epoch in range(self.args.train_epochs):
+        for epoch in range(self.args.ts_only_epochs + self.args.train_epochs):
+            # If we are finished training time series only, and we want to freeze TS weights
+            if epoch == self.args.ts_only_epochs and self.args.freeze_ts:
+                print("Now freezing time series leg weights...")
+                for p in self.model.enc_embedding.parameters():
+                    p.requires_grad = False
+                
+                for p in self.model.encoder.parameters():
+                    p.requires_grad = False
+            
             iter_count = 0
             train_loss = []
 
@@ -571,10 +583,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     prompt = batch_text
                     prompt_embeddings = torch.tensor([self.text_model.infer_vector(text) for text in prompt]).to(self.device)
                 if self.use_fullmodel:
-                    prompt_emb =self.llm_model(inputs_embeds=prompt_embeddings).last_hidden_state
+                    prompt_emb = self.llm_model(inputs_embeds=prompt_embeddings).last_hidden_state
                 else:
-                    prompt_emb=prompt_embeddings 
-                prompt_emb = self.mlp(prompt_emb) 
+                    prompt_emb=prompt_embeddings
+                    
+                if self.args.model != 'ChimeraTransformer':
+                    prompt_emb = self.mlp(prompt_emb)
+                
                 # decoder input
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
@@ -585,22 +600,22 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 final_gate_value = None
                 
                 if self.args.model == 'ChimeraTransformer':
-                    if not self.args.ts_only: # Whole chimera
+                    if epoch >= self.args.ts_only_epochs: # Train whole chimera
                         if self.args.architecture == 'raw_skip_dual_gate':
                             outputs, gate_value, final_gate_value = self.model(batch_x, batch_x_mark, 
                                                                 batch_y[:, :self.args.label_len, :], 
                                                                 batch_y_mark[:, :self.args.label_len, :], 
-                                                                prompt_embeddings)
+                                                                prompt_emb)
                         else:
                             outputs, gate_value, _ = self.model(batch_x, batch_x_mark, 
                                                                 batch_y[:, :self.args.label_len, :], 
                                                                 batch_y_mark[:, :self.args.label_len, :], 
-                                                                prompt_embeddings)
+                                                                prompt_emb)
                     else: # Time series leg only, no gates
                         outputs = self.model.forward_ts(batch_x, batch_x_mark, 
                                                             batch_y[:, :self.args.label_len, :], 
                                                             batch_y_mark[:, :self.args.label_len, :], 
-                                                            prompt_embeddings)
+                                                            prompt_emb)
                 else:
                     # Existing forward pass for other models
                     if self.args.output_attention:
@@ -652,7 +667,6 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 train_loss.append(total_loss.item())
                 last_gate = (gate_value, final_gate_value)
 
-
                 if (i + 1) % 100 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, total_loss.item()))
                     speed = (time.time() - time_now) / iter_count
@@ -699,14 +713,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         self.model.load_state_dict(torch.load(best_model_path))
         
         # Save encoder weights if training time series leg only
-        if self.args.ts_only and self.args.model == 'ChimeraTransformer':
-            torch.save(
-                {
-                    'enc_embedding': self.model.enc_embedding.state_dict(),
-                    'encoder': self.model.encoder.state_dict()
-                },
-                self.args.ts_path
-            )
+        # if self.args.ts_only and self.args.model == 'ChimeraTransformer':
+        #     torch.save(
+        #         {
+        #             'enc_embedding': self.model.enc_embedding.state_dict(),
+        #             'encoder': self.model.encoder.state_dict()
+        #         },
+        #         self.args.ts_path
+        #     )
 
         return self.model
 
@@ -753,7 +767,10 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     prompt_emb =self.llm_model(inputs_embeds=prompt_embeddings).last_hidden_state
                 else:
                     prompt_emb=prompt_embeddings 
-                prompt_emb = self.mlp(prompt_emb)  
+                    
+                if self.args.model != 'ChimeraTransformer':
+                    prompt_emb = self.mlp(prompt_emb)
+                    
                 # decoder input
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
@@ -762,7 +779,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     outputs, _, _ = self.model(batch_x, batch_x_mark, 
                                   batch_y[:, :self.args.label_len, :], 
                                   batch_y_mark[:, :self.args.label_len, :], 
-                                  prompt_embeddings)
+                                  prompt_emb)
                 else:
                     # Existing forward pass for other models
                     if self.args.output_attention:
