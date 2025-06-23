@@ -10,8 +10,18 @@ import logging
 from datasets import load_dataset
 import sys
 import os
-sys.path.append(str(Path(__file__).parent / "keepa"))
-from analyze_history import parse_price_history, load_history
+current_dir = Path(__file__).parent
+if (current_dir / "keepa_test.py").exists():
+    sys.path.append(str(current_dir))
+elif (current_dir / "keepa" / "keepa_test.py").exists():
+    sys.path.append(str(current_dir / "keepa"))
+else:
+    sys.path.append(str(current_dir))
+try:
+    from analyze_history import parse_price_history, load_history
+except ImportError:
+    print("Error: Cannot import analyze_history. Make sure analyze_history.py is in the same directory.")
+    sys.exit(1)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -20,7 +30,15 @@ class AmazonKeepaDataPipeline:
     
     def __init__(self, work_dir: Path = Path(".")):
         self.work_dir = work_dir
-        self.keepa_dir = work_dir / "keepa"
+        
+        # Check if we're already in keepa directory or if keepa is a subdirectory
+        if (work_dir / "keepa_test.py").exists():
+            self.keepa_dir = work_dir  # We're already in keepa directory
+        elif (work_dir / "keepa" / "keepa_test.py").exists():
+            self.keepa_dir = work_dir / "keepa"  # keepa is a subdirectory
+        else:
+            self.keepa_dir = work_dir  # Default to current directory
+            
         self.data_dir = self.keepa_dir / "data"
         self.output_dir = work_dir / "combined_dataset"
         
@@ -70,6 +88,9 @@ class AmazonKeepaDataPipeline:
         
         keepa_script = self.keepa_dir / "keepa_test.py"
         if not keepa_script.exists():
+            logger.error(f"Keepa script not found at: {keepa_script}")
+            logger.error(f"Looking in keepa_dir: {self.keepa_dir}")
+            logger.error(f"Files in keepa_dir: {list(self.keepa_dir.glob('*.py'))}")
             raise FileNotFoundError(f"Keepa script not found: {keepa_script}")
         
         cmd = [
