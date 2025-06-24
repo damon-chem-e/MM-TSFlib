@@ -1,6 +1,7 @@
 import re
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 def get_loss(filename: str) -> list[float]:
     """Parse loss from file.
@@ -52,8 +53,6 @@ def grid_heads_layers():
     plt.legend(title="Pred_len", loc="lower left")
     plt.title("Num heads vs MSE Loss (4 layers)")
     
-grid_heads_layers()
-
 def grid_search():
     FILE_NAME = "grid_search_iTrans.txt"
     
@@ -108,5 +107,36 @@ def iTrans_encoder_search():
     plt.plot(x, nums)
     plt.plot(min_idx+2, min_val, marker='o')
 
-iTrans_encoder_search()
-plt.show()
+def ts_only_training():
+    loss = get_loss("ts_only.txt")
+    mses = np.array(loss)
+    
+    mses = mses.reshape(4, 4, 2, 2, 2)
+    print(mses[0, 3, 1, 0, 1])
+    mean_mses = mses.mean(axis=0)
+    lengths = [12, 24, 36, 48]
+    xs      = [5, 10]
+    ys      = [5, 10]
+    zs      = [0, 1]
+
+    rows = []
+    for i_len, length in enumerate(lengths):
+        for i_x, x in enumerate(xs):
+            for i_y, y in enumerate(ys):
+                for i_z, z in enumerate(zs):
+                    rows.append({
+                        "length":  length,
+                        "x":       x,
+                        "y":       y,
+                        "z":       z,
+                        "mean_mse": mean_mses[i_len, i_x, i_y, i_z]
+                    })
+
+    df = pd.DataFrame(rows).sort_values(
+        ["length", "x", "y", "z"], ignore_index=True
+    )
+    
+    print(df)
+
+ts_only_training()
+# plt.show()

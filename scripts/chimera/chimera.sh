@@ -3,9 +3,9 @@ export CUDA_VISIBLE_DEVICES=0
 root_paths=("./data/Public_Health")
 data_paths=("US_FLURATIO_Week.csv") 
 pred_lengths=(12 24 36 48)
-seeds=(2021)
 length=${#root_paths[@]}
-for seed in "${seeds[@]}"
+
+for seed in {2021..2028}
 do
   for ((i=0; i<$length; i++))
   do
@@ -14,11 +14,11 @@ do
       root_path=${root_paths[$i]}
       data_path=${data_paths[$i]}
       model_id=$(basename ${root_path})  
-      echo "Running model ChimeraTransformer with pred_len $pred_len"
+      echo "Running model ChimeraTransformer with pred_len $pred_len and seed $seed"
       python -u run.py \
         --model ChimeraTransformer \
-        --ts_only_epochs 3 \
-        --train_epochs 7 \
+        --ts_only_epochs 10 \
+        --train_epochs 0 \
         --freeze_ts 0 \
         --task_name long_term_forecast \
         --is_training 1 \

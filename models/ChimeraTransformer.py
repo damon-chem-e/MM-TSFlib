@@ -223,6 +223,7 @@ class Model(nn.Module):
         # De-Normalization from Non-stationary Transformer
         dec_out = dec_out * (stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
         dec_out = dec_out + (means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
+        dec_out = dec_out[:, -self.pred_len:, :]
         
         return dec_out, gate_value, final_gate_value
     
@@ -249,6 +250,7 @@ class Model(nn.Module):
         # De-Normalization from Non-stationary Transformer
         dec_out = dec_out * (stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
         dec_out = dec_out + (means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
+        dec_out = dec_out[:, -self.pred_len:, :]
         
         return dec_out
     
