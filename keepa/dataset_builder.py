@@ -59,10 +59,12 @@ class AmazonKeepaDataPipeline:
         self.data_dir = self.keepa_dir / "data"
         self.output_dir = work_dir / "combined_dataset"
         self.huggingface_dir = work_dir / "huggingface_data"
+        self.processed_datasets_dir = work_dir / "processed_datasets"
         
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.huggingface_dir.mkdir(parents=True, exist_ok=True)
+        self.processed_datasets_dir.mkdir(parents=True, exist_ok=True)
     
 
     
@@ -520,10 +522,10 @@ class AmazonKeepaDataPipeline:
         reviews_pl = pl.from_pandas(reviews_df)
         metadata_pl = pl.from_pandas(metadata_df)
         
-        # Filter ASINs with minimum reviews
-        asin_counts = reviews_pl.group_by('asin').count()
-        valid_asins_df = asin_counts.filter(pl.col('count') >= min_reviews_per_asin)
-        valid_asins = valid_asins_df.select('asin').to_series().to_list()
+        # Filter ASINs with minimum reviews - use parent_asin for consistency with other methods
+        asin_counts = reviews_pl.group_by('parent_asin').len()
+        valid_asins_df = asin_counts.filter(pl.col('len') >= min_reviews_per_asin)
+        valid_asins = valid_asins_df.select('parent_asin').to_series().to_list()
         
         # Limit to max_asins if specified (for debugging/testing)
         if max_asins is not None:
@@ -531,8 +533,8 @@ class AmazonKeepaDataPipeline:
             logger.info(f"Limited to first {max_asins} ASINs for debugging/testing")
         
         # Filter to only the valid ASINs
-        valid_asins_df = valid_asins_df.filter(pl.col('asin').is_in(valid_asins))
-        reviews_pl = reviews_pl.join(valid_asins_df.select('asin'), on='asin', how='inner')
+        valid_asins_df = valid_asins_df.filter(pl.col('parent_asin').is_in(valid_asins))
+        reviews_pl = reviews_pl.join(valid_asins_df.select('parent_asin'), on='parent_asin', how='inner')
         
         logger.info(f"Processing {len(valid_asins)} ASINs with at least {min_reviews_per_asin} reviews")
         
@@ -540,8 +542,15 @@ class AmazonKeepaDataPipeline:
             logger.warning("No ASINs meet the minimum review requirement")
             return pd.DataFrame()
         
-        # Merge with metadata
-        reviews_pl = reviews_pl.join(metadata_pl, on='asin', how='left')
+        # Merge with metadata - use parent_asin for joining
+        if not metadata_pl.is_empty():
+            # Ensure metadata has the correct column names for joining
+            if 'parent_asin' in metadata_pl.columns:
+                reviews_pl = reviews_pl.join(metadata_pl, on='parent_asin', how='left')
+            else:
+                logger.warning("Metadata does not have parent_asin column, skipping metadata join")
+        else:
+            logger.warning("No metadata available, processing without metadata")
         
         # Create window labels based on strategy
         if windowing_strategy == "calendar":
@@ -549,57 +558,89 @@ class AmazonKeepaDataPipeline:
             reviews_pl = reviews_pl.with_columns([
                 pl.col('datetime').dt.truncate(f'{calendar_window_days}d').alias('window_start')
             ])
-            group_cols = ['asin', 'window_start']
+            group_cols = ['parent_asin', 'window_start']
         elif windowing_strategy == "review_frequency":
             # Create review frequency windows
-            reviews_pl = reviews_pl.sort(['asin', 'datetime'])
+            reviews_pl = reviews_pl.sort(['parent_asin', 'datetime'])
             reviews_pl = reviews_pl.with_columns([
-                (pl.col('row_nr').over('asin') // review_window_size).alias('window_id')
+                (pl.col('row_nr').over('parent_asin') // review_window_size).alias('window_id')
             ])
-            group_cols = ['asin', 'window_id']
+            group_cols = ['parent_asin', 'window_id']
         else:
             raise ValueError(f"Unsupported windowing strategy: {windowing_strategy}")
         
         # Define aggregations
         agg_exprs = [
             pl.col('rating').mean().alias('avg_rating_window'),
-            pl.col('asin').count().alias('review_count_window'),
+            pl.col('parent_asin').len().alias('review_count_window'),
         ]
         
         # Add optional columns if they exist
-        if 'helpful_votes' in reviews_pl.columns:
-            agg_exprs.append(pl.col('helpful_votes').sum().alias('helpful_votes_sum'))
+        if 'helpful_vote' in reviews_pl.columns:
+            agg_exprs.append(pl.col('helpful_vote').sum().alias('helpful_votes_sum'))
+        else:
+            agg_exprs.append(pl.lit(0).alias('helpful_votes_sum'))
+            
         if 'verified_purchase' in reviews_pl.columns:
             agg_exprs.append(pl.col('verified_purchase').mean().alias('verified_purchases_ratio'))
+        else:
+            agg_exprs.append(pl.lit(0.0).alias('verified_purchases_ratio'))
         
-        # Add metadata columns
-        agg_exprs.extend([
-            pl.col('title').first().alias('title'),
-            pl.col('category').first().alias('category'),
-            pl.col('brand').first().alias('brand'),
-            pl.col('price').first().alias('price_metadata'),
-            pl.col('avg_rating').first().alias('avg_rating_metadata'),
-            pl.col('rating_count').first().alias('rating_count_metadata')
-        ])
+        # Add metadata columns - use correct column names from metadata
+        # Check if columns exist before adding them to avoid errors
+        if 'title' in reviews_pl.columns:
+            agg_exprs.append(pl.col('title').first().alias('title'))
+        else:
+            agg_exprs.append(pl.lit('').alias('title'))
+            
+        if 'main_category' in reviews_pl.columns:
+            agg_exprs.append(pl.col('main_category').first().alias('category'))
+        else:
+            agg_exprs.append(pl.lit(category).alias('category'))
+            
+        if 'brand' in reviews_pl.columns:
+            agg_exprs.append(pl.col('brand').first().alias('brand'))
+        else:
+            agg_exprs.append(pl.lit('').alias('brand'))
+            
+        if 'price' in reviews_pl.columns:
+            agg_exprs.append(pl.col('price').first().alias('price_metadata'))
+        else:
+            agg_exprs.append(pl.lit('').alias('price_metadata'))
+            
+        if 'average_rating' in reviews_pl.columns:
+            agg_exprs.append(pl.col('average_rating').first().alias('avg_rating_metadata'))
+        else:
+            agg_exprs.append(pl.lit(None).alias('avg_rating_metadata'))
+            
+        if 'rating_number' in reviews_pl.columns:
+            agg_exprs.append(pl.col('rating_number').first().alias('rating_count_metadata'))
+        else:
+            agg_exprs.append(pl.lit(None).alias('rating_count_metadata'))
         
         # Handle review text aggregation
         if include_all_reviews:
             agg_exprs.append(
-                pl.col('text').drop_nulls().cast(pl.Utf8).str.concat(' ||| ').str.slice(0, 5000).alias('review_text')
+                pl.col('text').drop_nulls().cast(pl.Utf8).str.join(' ||| ').str.slice(0, 5000).alias('review_text')
             )
         else:
             agg_exprs.append(
                 pl.col('text').first().str.slice(0, 500).alias('review_text')
             )
         
-        # Add timestamp column
+        # Add timestamp column - ensure we get a single value, not a list
         if windowing_strategy == "calendar":
-            agg_exprs.append(pl.col('window_start').alias('timestamp'))
+            agg_exprs.append(pl.col('window_start').first().alias('timestamp'))
         else:
             agg_exprs.append(pl.col('datetime').first().alias('timestamp'))
         
         # Perform groupby aggregation
         aggregated = reviews_pl.group_by(group_cols).agg(agg_exprs)
+        
+        # Add ASIN column (rename parent_asin to asin for consistency)
+        aggregated = aggregated.with_columns([
+            pl.col('parent_asin').alias('asin')
+        ])
         
         # Add configuration metadata
         aggregated = aggregated.with_columns([
@@ -615,9 +656,8 @@ class AmazonKeepaDataPipeline:
             pl.col('timestamp').dt.month().alias('month')
         ])
         
-        # Fill NaN values
+        # Fill NaN values - only fill non-nullable columns
         aggregated = aggregated.with_columns([
-            pl.col('avg_rating_window').fill_null(pl.NA),
             pl.col('helpful_votes_sum').fill_null(0),
             pl.col('verified_purchases_ratio').fill_null(0.0),
             pl.col('review_text').fill_null('')
@@ -1284,18 +1324,23 @@ class AmazonKeepaDataPipeline:
             logger.warning("No data to save")
             return {}
         
-        # Determine base name based on data source
+        # Determine output directory and base name based on data source
         if config_metadata and config_metadata.get('data_source') == 'huggingface_only':
-            base_name = f"huggingface_only_{category}_{datetime.now().strftime('%Y%m%d')}"
+            # Use new directory structure for HuggingFace-only data
+            output_dir = self.processed_datasets_dir / "huggingface_only"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            base_name = category
         elif config_metadata and config_metadata.get('data_source') == 'keepa_huggingface_combined':
+            output_dir = self.output_dir
             base_name = f"amazon_keepa_{category}_{datetime.now().strftime('%Y%m%d')}"
         else:
+            output_dir = self.output_dir
             base_name = f"amazon_keepa_{category}_{datetime.now().strftime('%Y%m%d')}"
         
         output_paths = {}
         
         # Save Parquet
-        parquet_path = self.output_dir / f"{base_name}.parquet"
+        parquet_path = output_dir / f"{base_name}.parquet"
         df.to_parquet(parquet_path, index=False)
         output_paths['parquet'] = parquet_path
         logger.info(f"Saved Parquet: {parquet_path}")
@@ -1332,7 +1377,7 @@ class AmazonKeepaDataPipeline:
         if config_metadata:
             summary['processing_config'] = config_metadata
         
-        summary_path = self.output_dir / f"{base_name}_summary.json"
+        summary_path = output_dir / f"{base_name}_summary.json"
         with open(summary_path, 'w') as f:
             json.dump(summary, f, indent=2, default=str)
         output_paths['summary'] = summary_path
