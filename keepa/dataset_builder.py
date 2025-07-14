@@ -31,17 +31,120 @@ except ImportError:
     print("Error: Cannot import analyze_history. Make sure analyze_history.py is in the same directory.")
     sys.exit(1)
 
-# Set up rich logging
-logging.basicConfig(
-    level="INFO",
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[RichHandler(rich_tracebacks=True)]
-)
+# Set up logging - will be configured based on SLURM mode
 logger = logging.getLogger(__name__)
 console = Console()
 
+def setup_logging(use_slurm: bool = False):
+    """Configure logging based on SLURM mode."""
+    if use_slurm:
+        # Plain logging for SLURM
+        logging.basicConfig(
+            level="INFO",
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            handlers=[logging.StreamHandler()]
+        )
+    else:
+        # Rich logging for interactive use
+        logging.basicConfig(
+            level="INFO",
+            format="%(message)s",
+            datefmt="[%X]",
+            handlers=[RichHandler(rich_tracebacks=True)]
+        )
+
 app = typer.Typer()
+
+# Add global SLURM option and output context manager
+USE_SLURM = False
+
+# Add global Typer callback for --slurm (must be before any commands)
+@app.callback()
+def main(
+    slurm: bool = typer.Option(False, "--slurm", help="Use SLURM-friendly output (plain, flushed, no rich formatting)")
+):
+    global USE_SLURM
+    USE_SLURM = slurm
+    # Set up logging based on SLURM mode
+    setup_logging(slurm)
+
+class SlurmOutput:
+    """
+    Context manager for SLURM-friendly or rich output.
+    Use .print() for messages and .progress() for progress updates.
+    """
+    def __init__(self, use_slurm: bool):
+        self.use_slurm = use_slurm
+        self.console = console if not use_slurm else None
+        self.progress_ctx = None
+        self.progress_task = None
+        self.progress_total = None
+        self.progress_current = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.progress_ctx:
+            self.progress_ctx.__exit__(exc_type, exc_val, exc_tb)
+
+    def print(self, *args, **kwargs):
+        if self.use_slurm:
+            # Strip rich formatting for SLURM mode
+            text = " ".join(str(arg) for arg in args)
+            # Remove rich formatting tags like [bold blue], [green], etc.
+            import re
+            text = re.sub(r'\[[^\]]*\]', '', text)
+            print(text, flush=True, **kwargs)
+        else:
+            self.console.print(*args, **kwargs)
+
+    def panel(self, *args, **kwargs):
+        if self.use_slurm:
+            # Just print the text content without rich formatting
+            text = args[0] if args else ""
+            if hasattr(text, 'renderable'):
+                text = text.renderable
+            # Strip rich formatting
+            import re
+            text = re.sub(r'\[[^\]]*\]', '', str(text))
+            self.print(text)
+        else:
+            self.console.print(Panel(*args, **kwargs))
+
+    def start_progress(self, description, total):
+        self.progress_total = total
+        self.progress_current = 0
+        if self.use_slurm:
+            self.print(f"{description} (0/{total})")
+        else:
+            self.progress_ctx = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                console=self.console
+            )
+            self.progress_ctx.__enter__()
+            self.progress_task = self.progress_ctx.add_task(description, total=total)
+
+    def update_progress(self, description=None):
+        self.progress_current += 1
+        if self.use_slurm:
+            msg = f"{description} ({self.progress_current}/{self.progress_total})" if description else f"Progress: {self.progress_current}/{self.progress_total}"
+            self.print(msg)
+        else:
+            if description:
+                self.progress_ctx.update(self.progress_task, description=description)
+            self.progress_ctx.advance(self.progress_task)
+
+    def stop_progress(self):
+        if self.progress_ctx:
+            self.progress_ctx.__exit__(None, None, None)
+            self.progress_ctx = None
+            self.progress_task = None
 
 class AmazonKeepaDataPipeline:
     
@@ -1826,33 +1929,28 @@ def download_huggingface(
 ):
     """Download HuggingFace data, save locally, and extract ASINs in one operation."""
     max_asins_display = "All ASINs" if max_asins is None else str(max_asins)
-    console.print(Panel.fit(
-        f"[bold blue]Downloading HuggingFace Data & Extracting ASINs[/bold blue]\n"
-        f"Category: {category}\n"
-        f"Min Reviews: {min_reviews}\n"
-        f"Max ASINs: {max_asins_display}",
-        border_style="blue"
-    ))
-    
-    pipeline = AmazonKeepaDataPipeline(work_dir)
-    
-    try:
-        output_paths = pipeline.download_huggingface_data(category, min_reviews, max_asins, sample_reviews)
-        
-        console.print("\n[bold green]Download and extraction completed![/bold green]")
-        console.print("Files saved:")
-        for file_type, path in output_paths.items():
-            if path:
-                console.print(f"  {file_type}: {path}")
-        
-        console.print(f"\n[bold]Next Steps:[/bold]")
-        console.print(f"  Use ASIN file with: python keepa.py download <api_key_file> {output_paths['asins']}")
-        console.print(f"  Then merge datasets: python dataset_builder.py merge-datasets --category {category}")
-                
-    except Exception as e:
-        console.print(f"[bold red]Download failed: {e}[/bold red]")
-        raise typer.Exit(1)
-
+    with SlurmOutput(USE_SLURM) as out:
+        out.panel(
+            f"[bold blue]Downloading HuggingFace Data & Extracting ASINs[/bold blue]\n"
+            f"Category: {category}\n"
+            f"Min Reviews: {min_reviews}\n"
+            f"Max ASINs: {max_asins_display}",
+            border_style="blue"
+        )
+        pipeline = AmazonKeepaDataPipeline(work_dir)
+        try:
+            output_paths = pipeline.download_huggingface_data(category, min_reviews, max_asins, sample_reviews)
+            out.print("\n[bold green]Download and extraction completed![/bold green]")
+            out.print("Files saved:")
+            for file_type, path in output_paths.items():
+                if path:
+                    out.print(f"  {file_type}: {path}")
+            out.print(f"\n[bold]Next Steps:[/bold]")
+            out.print(f"  Use ASIN file with: python keepa.py download <api_key_file> {output_paths['asins']}")
+            out.print(f"  Then merge datasets: python dataset_builder.py merge-datasets --category {category}")
+        except Exception as e:
+            out.print(f"[bold red]Download failed: {e}[/bold red]")
+            raise typer.Exit(1)
 
 @app.command()
 def merge_datasets(
@@ -1867,97 +1965,77 @@ def merge_datasets(
     debug: bool = typer.Option(False, "--debug", help="Enable debug mode with full tracebacks and stop on first error")
 ):
     """Merge Keepa price data with Amazon review data using different windowing strategies."""
-    
-    # Validate windowing strategy
     valid_strategies = ["price_observation", "calendar", "review_frequency"]
-    if windowing_strategy not in valid_strategies:
-        console.print(f"[bold red]Invalid windowing strategy: {windowing_strategy}[/bold red]")
-        console.print(f"Valid options: {', '.join(valid_strategies)}")
-        raise typer.Exit(1)
-    
-    # Create strategy description
-    if windowing_strategy == "price_observation":
-        strategy_desc = f"Price observation windows ({time_window_days} days around each price change)"
-    elif windowing_strategy == "calendar":
-        strategy_desc = f"Calendar windows ({calendar_window_interval} intervals)"
-    else:  # review_frequency
-        strategy_desc = f"Review frequency windows (every {review_window_size} reviews)"
-    
-    console.print(Panel.fit(
-        f"[bold blue]Merging Datasets[/bold blue]\n"
-        f"Category: {category}\n"
-        f"Strategy: {strategy_desc}\n"
-        f"Include All Reviews: {include_all_reviews}",
-        border_style="blue"
-    ))
-    
-    pipeline = AmazonKeepaDataPipeline(work_dir)
-    
-    try:
-        # Check if Keepa data exists
-        keepa_files = list(pipeline.data_dir.glob("*_complete.json"))
-        if not keepa_files:
-            console.print("[bold red]No Keepa data found! Run keepa.py download first.[/bold red]")
+    with SlurmOutput(USE_SLURM) as out:
+        if windowing_strategy not in valid_strategies:
+            out.print(f"[bold red]Invalid windowing strategy: {windowing_strategy}[/bold red]")
+            out.print(f"Valid options: {', '.join(valid_strategies)}")
             raise typer.Exit(1)
-        
-        console.print(f"Found {len(keepa_files)} Keepa data files")
-        
-        # Handle HuggingFace data
-        if pull_huggingface:
-            console.print("Pulling HuggingFace data from cloud...")
-            pipeline.download_huggingface_data(category, 10, None)  # Default values for min_reviews and max_asins
-        else:
-            # Check if local HuggingFace data exists
-            category_dir = pipeline.huggingface_dir / category
-            if not category_dir.exists():
-                console.print("[bold red]Local HuggingFace data not found! Use --pull-huggingface to download.[/bold red]")
-                raise typer.Exit(1)
-        
-        # Merge datasets with appropriate parameters
         if windowing_strategy == "price_observation":
-            combined_df = pipeline.combine_datasets(
-                category, time_window_days, include_all_reviews, 
-                windowing_strategy, calendar_window_interval, review_window_size, debug
-            )
+            strategy_desc = f"Price observation windows ({time_window_days} days around each price change)"
         elif windowing_strategy == "calendar":
-            combined_df = pipeline.combine_datasets(
-                category, time_window_days, include_all_reviews,
-                windowing_strategy, calendar_window_interval, review_window_size, debug
-            )
-        else:  # review_frequency
-            combined_df = pipeline.combine_datasets(
-                category, time_window_days, include_all_reviews,
-                windowing_strategy, calendar_window_interval, review_window_size, debug
-            )
-        
-        # Prepare configuration metadata
-        config_metadata = {
-            'data_source': 'keepa_huggingface_combined',
-            'windowing_strategy': windowing_strategy,
-            'time_window_days': time_window_days if windowing_strategy == "price_observation" else None,
-            'calendar_window_interval': calendar_window_interval if windowing_strategy == "calendar" else None,
-            'review_window_size': review_window_size if windowing_strategy == "review_frequency" else None,
-            'include_all_reviews': include_all_reviews
-        }
-        
-        # Save results with configuration metadata
-        output_paths = pipeline.save_organized_data(combined_df, category, config_metadata)
-        
-        console.print("\n[bold green]Merge completed![/bold green]")
-        console.print("Output files:")
-        for file_type, path in output_paths.items():
-            console.print(f"  {file_type}: {path}")
-            
-    except Exception as e:
-        if debug:
-            console.print(f"[bold red]Merge failed: {e}[/bold red]")
-            import traceback
-            console.print(f"[bold red]Full traceback:[/bold red]\n{traceback.format_exc()}")
-            raise typer.Exit(1)
+            strategy_desc = f"Calendar windows ({calendar_window_interval} intervals)"
         else:
-            console.print(f"[bold red]Merge failed: {e}[/bold red]")
-            raise typer.Exit(1)
-
+            strategy_desc = f"Review frequency windows (every {review_window_size} reviews)"
+        out.panel(
+            f"[bold blue]Merging Datasets[/bold blue]\n"
+            f"Category: {category}\n"
+            f"Strategy: {strategy_desc}\n"
+            f"Include All Reviews: {include_all_reviews}",
+            border_style="blue"
+        )
+        pipeline = AmazonKeepaDataPipeline(work_dir)
+        try:
+            keepa_files = list(pipeline.data_dir.glob("*_complete.json"))
+            if not keepa_files:
+                out.print("[bold red]No Keepa data found! Run keepa.py download first.[/bold red]")
+                raise typer.Exit(1)
+            out.print(f"Found {len(keepa_files)} Keepa data files")
+            if pull_huggingface:
+                out.print("Pulling HuggingFace data from cloud...")
+                pipeline.download_huggingface_data(category, 10, None)
+            else:
+                category_dir = pipeline.huggingface_dir / category
+                if not category_dir.exists():
+                    out.print("[bold red]Local HuggingFace data not found! Use --pull-huggingface to download.[/bold red]")
+                    raise typer.Exit(1)
+            if windowing_strategy == "price_observation":
+                combined_df = pipeline.combine_datasets(
+                    category, time_window_days, include_all_reviews, 
+                    windowing_strategy, calendar_window_interval, review_window_size, debug
+                )
+            elif windowing_strategy == "calendar":
+                combined_df = pipeline.combine_datasets(
+                    category, time_window_days, include_all_reviews,
+                    windowing_strategy, calendar_window_interval, review_window_size, debug
+                )
+            else:
+                combined_df = pipeline.combine_datasets(
+                    category, time_window_days, include_all_reviews,
+                    windowing_strategy, calendar_window_interval, review_window_size, debug
+                )
+            config_metadata = {
+                'data_source': 'keepa_huggingface_combined',
+                'windowing_strategy': windowing_strategy,
+                'time_window_days': time_window_days if windowing_strategy == "price_observation" else None,
+                'calendar_window_interval': calendar_window_interval if windowing_strategy == "calendar" else None,
+                'review_window_size': review_window_size if windowing_strategy == "review_frequency" else None,
+                'include_all_reviews': include_all_reviews
+            }
+            output_paths = pipeline.save_organized_data(combined_df, category, config_metadata)
+            out.print("\n[bold green]Merge completed![/bold green]")
+            out.print("Output files:")
+            for file_type, path in output_paths.items():
+                out.print(f"  {file_type}: {path}")
+        except Exception as e:
+            if debug:
+                out.print(f"[bold red]Merge failed: {e}[/bold red]")
+                import traceback
+                out.print(f"[bold red]Full traceback:[/bold red]\n{traceback.format_exc()}")
+                raise typer.Exit(1)
+            else:
+                out.print(f"[bold red]Merge failed: {e}[/bold red]")
+                raise typer.Exit(1)
 
 @app.command()
 def full_pipeline(
@@ -1974,54 +2052,41 @@ def full_pipeline(
     work_dir: Path = typer.Option(".", help="Working directory")
 ):
     """Run the complete pipeline: extract ASINs, download data, and merge."""
-    
-    # Create strategy description
-    if windowing_strategy == "price_observation":
-        strategy_desc = f"Price observation windows ({time_window_days} days around each price change)"
-    elif windowing_strategy == "calendar":
-        strategy_desc = f"Calendar windows ({calendar_window_days} day intervals)"
-    else:  # review_frequency
-        strategy_desc = f"Review frequency windows (every {review_window_size} reviews)"
-    
-    max_asins_display = "All ASINs" if max_asins is None else str(max_asins)
-    console.print(Panel.fit(
-        f"[bold blue]Full Pipeline[/bold blue]\n"
-        f"Category: {category}\n"
-        f"Max ASINs: {max_asins_display}\n"
-        f"Strategy: {strategy_desc}",
-        border_style="blue"
-    ))
-    
-    pipeline = AmazonKeepaDataPipeline(work_dir)
-    
-    try:
-        # Step 1: Download HuggingFace data and extract ASINs
-        console.print("\n[bold cyan]Step 1: Downloading HuggingFace data and extracting ASINs[/bold cyan]")
-        output_paths = pipeline.download_huggingface_data(category, min_reviews, max_asins, sample_reviews)
-        asins_file = output_paths['asins']
-        
-        # Step 2: Note about Keepa download and merge
-        console.print("\n[bold cyan]Step 2: Keepa Download Required[/bold cyan]")
-        console.print(f"Please run: python keepa.py download {api_key_file} {asins_file}")
-        
-        # Step 3: Note about merge with windowing strategy
-        console.print("\n[bold cyan]Step 3: Merge Datasets[/bold cyan]")
+    with SlurmOutput(USE_SLURM) as out:
         if windowing_strategy == "price_observation":
-            merge_cmd = f"python dataset_builder.py merge-datasets --category {category} --windowing-strategy {windowing_strategy} --time-window-days {time_window_days}"
+            strategy_desc = f"Price observation windows ({time_window_days} days around each price change)"
         elif windowing_strategy == "calendar":
-            merge_cmd = f"python dataset_builder.py merge-datasets --category {category} --windowing-strategy {windowing_strategy} --calendar-window-days {calendar_window_days}"
-        else:  # review_frequency
-            merge_cmd = f"python dataset_builder.py merge-datasets --category {category} --windowing-strategy {windowing_strategy} --review-window-size {review_window_size}"
-        
-        if include_all_reviews:
-            merge_cmd += " --include-all-reviews"
-        
-        console.print(f"Then run: {merge_cmd}")
-        
-    except Exception as e:
-        console.print(f"[bold red]Pipeline failed: {e}[/bold red]")
-        raise typer.Exit(1)
-
+            strategy_desc = f"Calendar windows ({calendar_window_days} day intervals)"
+        else:
+            strategy_desc = f"Review frequency windows (every {review_window_size} reviews)"
+        max_asins_display = "All ASINs" if max_asins is None else str(max_asins)
+        out.panel(
+            f"[bold blue]Full Pipeline[/bold blue]\n"
+            f"Category: {category}\n"
+            f"Max ASINs: {max_asins_display}\n"
+            f"Strategy: {strategy_desc}",
+            border_style="blue"
+        )
+        pipeline = AmazonKeepaDataPipeline(work_dir)
+        try:
+            out.print("\n[bold cyan]Step 1: Downloading HuggingFace data and extracting ASINs[/bold cyan]")
+            output_paths = pipeline.download_huggingface_data(category, min_reviews, max_asins, sample_reviews)
+            asins_file = output_paths['asins']
+            out.print("\n[bold cyan]Step 2: Keepa Download Required[/bold cyan]")
+            out.print(f"Please run: python keepa.py download {api_key_file} {asins_file}")
+            out.print("\n[bold cyan]Step 3: Merge Datasets[/bold cyan]")
+            if windowing_strategy == "price_observation":
+                merge_cmd = f"python dataset_builder.py merge-datasets --category {category} --windowing-strategy {windowing_strategy} --time-window-days {time_window_days}"
+            elif windowing_strategy == "calendar":
+                merge_cmd = f"python dataset_builder.py merge-datasets --category {category} --windowing-strategy {windowing_strategy} --calendar-window-days {calendar_window_days}"
+            else:
+                merge_cmd = f"python dataset_builder.py merge-datasets --category {category} --windowing-strategy {windowing_strategy} --review-window-size {review_window_size}"
+            if include_all_reviews:
+                merge_cmd += " --include-all-reviews"
+            out.print(f"Then run: {merge_cmd}")
+        except Exception as e:
+            out.print(f"[bold red]Pipeline failed: {e}[/bold red]")
+            raise typer.Exit(1)
 
 @app.command()
 def list_categories(
@@ -2029,51 +2094,40 @@ def list_categories(
     show_info: bool = typer.Option(False, "--info", help="Show detailed information for each category")
 ):
     """List available Amazon product categories from all_categories.txt."""
-    console.print(Panel.fit(
-        "[bold blue]Loading Amazon Product Categories[/bold blue]",
-        border_style="blue"
-    ))
-    
-    pipeline = AmazonKeepaDataPipeline(work_dir)
-    
-    try:
-        categories = pipeline.get_available_categories()
-        
-        if not categories:
-            console.print("[bold red]No categories found![/bold red]")
+    with SlurmOutput(USE_SLURM) as out:
+        out.panel(
+            "[bold blue]Loading Amazon Product Categories[/bold blue]",
+            border_style="blue"
+        )
+        pipeline = AmazonKeepaDataPipeline(work_dir)
+        try:
+            categories = pipeline.get_available_categories()
+            if not categories:
+                out.print("[bold red]No categories found![/bold red]")
+                raise typer.Exit(1)
+            out.print(f"\n[bold green]Found {len(categories)} categories:[/bold green]")
+            if show_info:
+                for category in categories:
+                    info = pipeline.get_category_info(category)
+                    status = "[green]✓[/green]" if info['local_data_exists'] else "[red]✗[/red]"
+                    out.print(f"\n{status} [bold]{category}[/bold]")
+                    if info['local_data_exists']:
+                        out.print(f"  Reviews: {info['reviews_count']:,}")
+                        out.print(f"  Metadata: {info['metadata_count']:,}")
+                        out.print(f"  Unique ASINs: {info['unique_asins']:,}")
+                        if info['date_range']:
+                            out.print(f"  Date Range: {info['date_range']['start'][:10]} to {info['date_range']['end'][:10]}")
+                    else:
+                        out.print("  [yellow]No local data[/yellow]")
+            else:
+                for i, category in enumerate(categories, 1):
+                    out.print(f"  {i:2d}. {category}")
+            out.print(f"\n[bold]Usage:[/bold]")
+            out.print(f"  python dataset_builder.py download-huggingface --category <category_name>")
+            out.print(f"  python dataset_builder.py merge-datasets --category <category_name>")
+        except Exception as e:
+            out.print(f"[bold red]Failed to load categories: {e}[/bold red]")
             raise typer.Exit(1)
-        
-        console.print(f"\n[bold green]Found {len(categories)} categories:[/bold green]")
-        
-        if show_info:
-            # Show detailed information
-            for category in categories:
-                info = pipeline.get_category_info(category)
-                
-                status = "[green]✓[/green]" if info['local_data_exists'] else "[red]✗[/red]"
-                console.print(f"\n{status} [bold]{category}[/bold]")
-                
-                if info['local_data_exists']:
-                    console.print(f"  Reviews: {info['reviews_count']:,}")
-                    console.print(f"  Metadata: {info['metadata_count']:,}")
-                    console.print(f"  Unique ASINs: {info['unique_asins']:,}")
-                    if info['date_range']:
-                        console.print(f"  Date Range: {info['date_range']['start'][:10]} to {info['date_range']['end'][:10]}")
-                else:
-                    console.print("  [yellow]No local data[/yellow]")
-        else:
-            # Show simple list
-            for i, category in enumerate(categories, 1):
-                console.print(f"  {i:2d}. {category}")
-        
-        console.print(f"\n[bold]Usage:[/bold]")
-        console.print(f"  python dataset_builder.py download-huggingface --category <category_name>")
-        console.print(f"  python dataset_builder.py merge-datasets --category <category_name>")
-        
-    except Exception as e:
-        console.print(f"[bold red]Failed to load categories: {e}[/bold red]")
-        raise typer.Exit(1)
-
 
 @app.command()
 def process_huggingface_only(
@@ -2091,116 +2145,91 @@ def process_huggingface_only(
     rolling_window_sizes: list[int] = typer.Option([3, 5, 10, 30], help="Rolling window sizes for additional statistics"),
     upsample: bool = typer.Option(False, "--upsample", help="Create empty buckets for missing time periods (increases row count)")
 ):
-    """Process HuggingFace review data without Keepa price data.
-    
-    Performance options:
-    - --optimized: Use single groupby operation over all ASINs (much faster for large datasets)
-    - --polars: Use Polars for processing (requires polars package, fastest option)
-    """
-    
-    # Validate windowing strategy
+    """Process HuggingFace review data without Keepa price data."""
     valid_strategies = ["calendar", "review_frequency"]
-    if windowing_strategy not in valid_strategies:
-        console.print(f"[bold red]Invalid windowing strategy: {windowing_strategy}[/bold red]")
-        console.print(f"Valid options: {', '.join(valid_strategies)}")
-        raise typer.Exit(1)
-    
-    # Create strategy description
-    if windowing_strategy == "calendar":
-        strategy_desc = f"Calendar windows ({calendar_window_interval} intervals)"
-    else:  # review_frequency
-        strategy_desc = f"Review frequency windows (every {review_window_size} reviews)"
-    
-    console.print(Panel.fit(
-        f"[bold blue]Processing HuggingFace Data Only[/bold blue]\n"
-        f"Category: {category}\n"
-        f"Strategy: {strategy_desc}\n"
-        f"Include All Reviews: {include_all_reviews}\n"
-        f"Min Reviews per ASIN: {min_reviews_per_asin}\n"
-        f"Max ASINs: {max_asins if max_asins is not None else 'All'}",
-        border_style="blue"
-    ))
-    
-    pipeline = AmazonKeepaDataPipeline(work_dir)
-    
-    try:
-        # Handle HuggingFace data
-        if pull_huggingface:
-            console.print("Pulling HuggingFace data from cloud...")
-            pipeline.download_huggingface_data(category, min_reviews_per_asin, max_asins)
+    with SlurmOutput(USE_SLURM) as out:
+        if windowing_strategy not in valid_strategies:
+            out.print(f"[bold red]Invalid windowing strategy: {windowing_strategy}[/bold red]")
+            out.print(f"Valid options: {', '.join(valid_strategies)}")
+            raise typer.Exit(1)
+        if windowing_strategy == "calendar":
+            strategy_desc = f"Calendar windows ({calendar_window_interval} intervals)"
         else:
-            # Check if local HuggingFace data exists
-            category_dir = pipeline.huggingface_dir / category
-            if not category_dir.exists():
-                console.print("[bold red]Local HuggingFace data not found! Use --pull-huggingface to download.[/bold red]")
-                raise typer.Exit(1)
-        
-        # Process HuggingFace data using selected method
-        if use_polars:
-            console.print("[bold cyan]Using Polars for processing...[/bold cyan]")
-            combined_df = pipeline.process_huggingface_only_polars(
-                category, windowing_strategy, calendar_window_interval, 
-                review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes, upsample
-            )
-        else:
-            console.print("[bold cyan]Using pandas processing...[/bold cyan]")
-            combined_df = pipeline.process_huggingface_only(
-                category, windowing_strategy, calendar_window_interval, 
-                review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes, upsample
-            )
-        
-        # Prepare configuration metadata
-        config_metadata = {
-            'data_source': 'huggingface_only',
-            'windowing_strategy': windowing_strategy,
-            'calendar_window_interval': calendar_window_interval if windowing_strategy == "calendar" else None,
-            'review_window_size': review_window_size if windowing_strategy == "review_frequency" else None,
-            'include_all_reviews': include_all_reviews,
-            'min_reviews_per_asin': min_reviews_per_asin,
-            'max_asins': max_asins,
-            'rolling_window_sizes': rolling_window_sizes,
-            'upsample': upsample
-        }
-        
-        # Save results using the organized data method with configuration metadata
+            strategy_desc = f"Review frequency windows (every {review_window_size} reviews)"
+        out.panel(
+            f"[bold blue]Processing HuggingFace Data Only[/bold blue]\n"
+            f"Category: {category}\n"
+            f"Strategy: {strategy_desc}\n"
+            f"Include All Reviews: {include_all_reviews}\n"
+            f"Min Reviews per ASIN: {min_reviews_per_asin}\n"
+            f"Max ASINs: {max_asins if max_asins is not None else 'All'}",
+            border_style="blue"
+        )
+        pipeline = AmazonKeepaDataPipeline(work_dir)
         try:
-            output_paths = pipeline.save_organized_data(combined_df, category, config_metadata)
-            
-            console.print("\n[bold green]Processing completed![/bold green]")
-            console.print("Output files:")
-            for file_type, path in output_paths.items():
-                console.print(f"  {file_type}: {path}")
-            
-            console.print(f"\n[bold]Dataset Summary:[/bold]")
-            console.print(f"  Total Records: {len(combined_df):,}")
-            console.print(f"  Unique ASINs: {combined_df['asin'].nunique():,}")
-            console.print(f"  Date Range: {combined_df['timestamp'].min().date()} to {combined_df['timestamp'].max().date()}")
-            console.print(f"  Average Reviews per Timepoint: {combined_df['review_count_window'].mean():.1f}")
-            
-            # Add note about metadata file
-            if 'metadata' in output_paths:
-                console.print(f"\n[bold yellow]Note:[/bold yellow] Product metadata has been saved to a separate file to reduce dataset size.")
-                console.print(f"  Use the metadata file to join product information (title, category, brand, etc.) when needed.")
-                
+            if pull_huggingface:
+                out.print("Pulling HuggingFace data from cloud...")
+                pipeline.download_huggingface_data(category, min_reviews_per_asin, max_asins)
+            else:
+                category_dir = pipeline.huggingface_dir / category
+                if not category_dir.exists():
+                    out.print("[bold red]Local HuggingFace data not found! Use --pull-huggingface to download.[/bold red]")
+                    raise typer.Exit(1)
+            if use_polars:
+                out.print("[bold cyan]Using Polars for processing...[/bold cyan]")
+                combined_df = pipeline.process_huggingface_only_polars(
+                    category, windowing_strategy, calendar_window_interval, 
+                    review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes, upsample
+                )
+            else:
+                out.print("[bold cyan]Using pandas processing...[/bold cyan]")
+                combined_df = pipeline.process_huggingface_only(
+                    category, windowing_strategy, calendar_window_interval, 
+                    review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes, upsample
+                )
+            config_metadata = {
+                'data_source': 'huggingface_only',
+                'windowing_strategy': windowing_strategy,
+                'calendar_window_interval': calendar_window_interval if windowing_strategy == "calendar" else None,
+                'review_window_size': review_window_size if windowing_strategy == "review_frequency" else None,
+                'include_all_reviews': include_all_reviews,
+                'min_reviews_per_asin': min_reviews_per_asin,
+                'max_asins': max_asins,
+                'rolling_window_sizes': rolling_window_sizes,
+                'upsample': upsample
+            }
+            try:
+                output_paths = pipeline.save_organized_data(combined_df, category, config_metadata)
+                out.print("\n[bold green]Processing completed![/bold green]")
+                out.print("Output files:")
+                for file_type, path in output_paths.items():
+                    out.print(f"  {file_type}: {path}")
+                out.print(f"\n[bold]Dataset Summary:[/bold]")
+                out.print(f"  Total Records: {len(combined_df):,}")
+                out.print(f"  Unique ASINs: {combined_df['asin'].nunique():,}")
+                out.print(f"  Date Range: {combined_df['timestamp'].min().date()} to {combined_df['timestamp'].max().date()}")
+                out.print(f"  Average Reviews per Timepoint: {combined_df['review_count_window'].mean():.1f}")
+                if 'metadata' in output_paths:
+                    out.print(f"\n[bold yellow]Note:[/bold yellow] Product metadata has been saved to a separate file to reduce dataset size.")
+                    out.print(f"  Use the metadata file to join product information (title, category, brand, etc.) when needed.")
+            except Exception as e:
+                if debug:
+                    out.print(f"[bold red]Error saving data: {e}[/bold red]")
+                    import traceback
+                    out.print(f"[bold red]Full traceback:[/bold red]\n{traceback.format_exc()}")
+                    raise typer.Exit(1)
+                else:
+                    out.print(f"[bold red]Error saving data: {e}[/bold red]")
+                    raise typer.Exit(1)
         except Exception as e:
             if debug:
-                console.print(f"[bold red]Error saving data: {e}[/bold red]")
+                out.print(f"[bold red]Processing failed: {e}[/bold red]")
                 import traceback
-                console.print(f"[bold red]Full traceback:[/bold red]\n{traceback.format_exc()}")
+                out.print(f"[bold red]Full traceback:[/bold red]\n{traceback.format_exc()}")
                 raise typer.Exit(1)
             else:
-                console.print(f"[bold red]Error saving data: {e}[/bold red]")
+                out.print(f"[bold red]Processing failed: {e}[/bold red]")
                 raise typer.Exit(1)
-            
-    except Exception as e:
-        if debug:
-            console.print(f"[bold red]Processing failed: {e}[/bold red]")
-            import traceback
-            console.print(f"[bold red]Full traceback:[/bold red]\n{traceback.format_exc()}")
-            raise typer.Exit(1)
-        else:
-            console.print(f"[bold red]Processing failed: {e}[/bold red]")
-            raise typer.Exit(1)
 
 @app.command()
 def category_info(
@@ -2208,41 +2237,34 @@ def category_info(
     work_dir: Path = typer.Option(".", help="Working directory")
 ):
     """Get detailed information about a specific category."""
-    console.print(Panel.fit(
-        f"[bold blue]Category Information[/bold blue]\n"
-        f"Category: {category}",
-        border_style="blue"
-    ))
-    
-    pipeline = AmazonKeepaDataPipeline(work_dir)
-    
-    try:
-        info = pipeline.get_category_info(category)
-        
-        console.print(f"\n[bold]Category:[/bold] {info['category']}")
-        console.print(f"[bold]Local Data:[/bold] {'✓ Available' if info['local_data_exists'] else '✗ Not Available'}")
-        
-        if info['local_data_exists']:
-            console.print(f"[bold]Reviews:[/bold] {info['reviews_count']:,}")
-            console.print(f"[bold]Metadata Records:[/bold] {info['metadata_count']:,}")
-            console.print(f"[bold]Unique ASINs:[/bold] {info['unique_asins']:,}")
-            
-            if info['date_range']:
-                console.print(f"[bold]Date Range:[/bold] {info['date_range']['start'][:10]} to {info['date_range']['end'][:10]}")
-            
-            if info['download_date']:
-                console.print(f"[bold]Downloaded:[/bold] {info['download_date'][:10]}")
-        
-        console.print(f"\n[bold]Next Steps:[/bold]")
-        if not info['local_data_exists']:
-            console.print(f"  1. Download data and extract ASINs: python dataset_builder.py download-huggingface --category {category}")
-        console.print(f"  2. Process HuggingFace only: python dataset_builder.py process-huggingface-only --category {category}")
-        console.print(f"  3. Download Keepa data: python keepa.py download <api_key> <asins_file>")
-        console.print(f"  4. Merge datasets: python dataset_builder.py merge-datasets --category {category}")
-        
-    except Exception as e:
-        console.print(f"[bold red]Failed to get category info: {e}[/bold red]")
-        raise typer.Exit(1)
+    with SlurmOutput(USE_SLURM) as out:
+        out.panel(
+            f"[bold blue]Category Information[/bold blue]\n"
+            f"Category: {category}",
+            border_style="blue"
+        )
+        pipeline = AmazonKeepaDataPipeline(work_dir)
+        try:
+            info = pipeline.get_category_info(category)
+            out.print(f"\n[bold]Category:[/bold] {info['category']}")
+            out.print(f"[bold]Local Data:[/bold] {'✓ Available' if info['local_data_exists'] else '✗ Not Available'}")
+            if info['local_data_exists']:
+                out.print(f"[bold]Reviews:[/bold] {info['reviews_count']:,}")
+                out.print(f"[bold]Metadata Records:[/bold] {info['metadata_count']:,}")
+                out.print(f"[bold]Unique ASINs:[/bold] {info['unique_asins']:,}")
+                if info['date_range']:
+                    out.print(f"[bold]Date Range:[/bold] {info['date_range']['start'][:10]} to {info['date_range']['end'][:10]}")
+                if info.get('download_date'):
+                    out.print(f"[bold]Downloaded:[/bold] {info['download_date'][:10]}")
+            out.print(f"\n[bold]Next Steps:[/bold]")
+            if not info['local_data_exists']:
+                out.print(f"  1. Download data and extract ASINs: python dataset_builder.py download-huggingface --category {category}")
+            out.print(f"  2. Process HuggingFace only: python dataset_builder.py process-huggingface-only --category {category}")
+            out.print(f"  3. Download Keepa data: python keepa.py download <api_key> <asins_file>")
+            out.print(f"  4. Merge datasets: python dataset_builder.py merge-datasets --category {category}")
+        except Exception as e:
+            out.print(f"[bold red]Failed to get category info: {e}[/bold red]")
+            raise typer.Exit(1)
 
 
 if __name__ == "__main__":
