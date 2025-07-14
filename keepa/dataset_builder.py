@@ -186,173 +186,24 @@ class AmazonKeepaDataPipeline:
     
     def process_huggingface_only(self, category: str, 
                                 windowing_strategy: str = "calendar",
-                                calendar_window_days: int = 1,
+                                calendar_window_interval: str = "1d",
                                 review_window_size: int = 10,
                                 include_all_reviews: bool = True,
                                 min_reviews_per_asin: int = 10,
                                 max_asins: Optional[int] = None,
                                 debug: bool = False,
-                                rolling_window_sizes: list[int] = [3, 5, 10, 30]) -> pd.DataFrame:
+                                rolling_window_sizes: list[int] = [3, 5, 10, 30],
+                                upsample: bool = False) -> pd.DataFrame:
         """
-        Process HuggingFace review data without Keepa price data.
+        Process HuggingFace review data without Keepa price data using pandas groupby approach.
         
-        Args:
-            category: Amazon product category
-            windowing_strategy: One of "calendar" or "review_frequency"
-            calendar_window_days: Days per calendar window (for calendar strategy)
-            review_window_size: Reviews per window (for review_frequency strategy)
-            include_all_reviews: Include all reviews in time window
-            min_reviews_per_asin: Minimum reviews required per ASIN to include
+        This method processes all ASINs together using a single groupby operation for consistency
+        with the Polars method and better performance than individual ASIN processing.
+        
+        Note: Images and videos are ignored for now but could be included later
+        when expanding to vision as another modality.
         """
-        logger.info(f"Processing HuggingFace data for {category} using {windowing_strategy} strategy")
-        
-        # Load HuggingFace data
-        reviews_df, metadata_df = self.load_local_huggingface_data(category)
-        
-        # Filter ASINs with minimum reviews and pre-filter reviews DataFrame
-        asin_counts = reviews_df['parent_asin'].value_counts()
-        valid_asins = asin_counts[asin_counts >= min_reviews_per_asin].index.tolist()
-        
-        # Limit to max_asins if specified (for debugging/testing)
-        if max_asins is not None:
-            valid_asins = valid_asins[:max_asins]
-            logger.info(f"Limited to first {max_asins} ASINs for debugging/testing")
-        
-        logger.info(f"Processing {len(valid_asins)} ASINs with at least {min_reviews_per_asin} reviews")
-        
-        # Pre-filter reviews to only include valid ASINs for better performance
-        valid_reviews_mask = reviews_df['parent_asin'].isin(valid_asins)
-        filtered_reviews_df = reviews_df[valid_reviews_mask].copy()
-        
-        # Create a lookup dictionary for metadata to avoid repeated DataFrame queries
-        metadata_lookup = {}
-        for _, row in metadata_df.iterrows():
-            asin_key = row['parent_asin']
-            metadata_lookup[asin_key] = {
-                'title': row.get('title', ''),
-                'main_category': row.get('main_category', category),
-                'brand': row.get('brand', ''),
-                'price': row.get('price', ''),
-                'average_rating': row.get('average_rating', None),
-                'rating_number': row.get('rating_number', None)
-            }
-        
-        combined_records = []
-        
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeElapsedColumn(),
-            console=console
-        ) as progress:
-            
-            task = progress.add_task("Processing ASINs", total=len(valid_asins))
-            
-            for asin in valid_asins:
-                progress.update(task, description=f"Processing {asin}")
-                
-                try:
-                    # Get product metadata from lookup (much faster than DataFrame query)
-                    if asin in metadata_lookup:
-                        meta = metadata_lookup[asin]
-                        product_title = meta['title']
-                        product_category = meta['main_category']
-                        product_brand = meta['brand']
-                        product_price = meta['price']
-                        avg_rating = meta['average_rating']
-                        rating_count = meta['rating_number']
-                    else:
-                        product_title = f"Product_{asin}"
-                        product_category = category
-                        product_brand = ""
-                        product_price = ""
-                        avg_rating = None
-                        rating_count = None
-                    
-                    # Get reviews for this ASIN (much faster with pre-filtered DataFrame)
-                    asin_reviews = filtered_reviews_df[
-                        (filtered_reviews_df['asin'] == asin) | (filtered_reviews_df['parent_asin'] == asin)
-                    ].copy().sort_values('datetime')
-                    
-                    if asin_reviews.empty:
-                        logger.warning(f"No reviews found for {asin}")
-                        progress.advance(task)
-                        continue
-                    
-                    if windowing_strategy == "calendar":
-                        asin_df = self._process_calendar_windows_huggingface_only(
-                            asin, asin_reviews, product_title, product_category,
-                            product_brand, product_price, avg_rating, rating_count,
-                            calendar_window_days, include_all_reviews
-                        )
-                        if not asin_df.empty:
-                            combined_records.append(asin_df)
-                    elif windowing_strategy == "review_frequency":
-                        asin_df = self._process_review_frequency_windows_huggingface_only(
-                            asin, asin_reviews, product_title, product_category,
-                            product_brand, product_price, avg_rating, rating_count,
-                            review_window_size, include_all_reviews
-                        )
-                        if not asin_df.empty:
-                            combined_records.append(asin_df)
-                    else:
-                        raise ValueError(f"Unknown windowing strategy: {windowing_strategy}")
-                        
-                except Exception as e:
-                    if debug:
-                        logger.error(f"Error processing {asin}: {e}")
-                        import traceback
-                        logger.error(f"Full traceback:\n{traceback.format_exc()}")
-                        raise  # Re-raise the exception to stop processing
-                    else:
-                        logger.error(f"Error processing {asin}: {e}")
-                        continue
-                
-                progress.advance(task)
-        
-        if combined_records:
-            combined_df = pd.concat(combined_records, ignore_index=True)
-            logger.info(f"Processed dataset created: {len(combined_df)} records, {combined_df['asin'].nunique()} unique ASINs")
-        else:
-            combined_df = pd.DataFrame()
-            logger.info("No records created")
-        
-        # Add rolling statistics for calendar windows
-        if windowing_strategy == "calendar" and not combined_df.empty:
-            try:
-                combined_df = self._add_rolling_statistics(combined_df)
-            except Exception as e:
-                if debug:
-                    logger.error(f"Error adding rolling statistics: {e}")
-                    import traceback
-                    logger.error(f"Full traceback:\n{traceback.format_exc()}")
-                    raise  # Re-raise the exception to stop processing
-                else:
-                    logger.warning(f"Error adding rolling statistics: {e}")
-                    logger.info("Continuing without rolling statistics")
-        
-        combined_df = self._drop_metadata_columns(combined_df)
-        combined_df = self._add_rolling_window_statistics(combined_df, rolling_window_sizes)
-        return combined_df
-    
-    def process_huggingface_only_optimized(self, category: str, 
-                                         windowing_strategy: str = "calendar",
-                                         calendar_window_days: int = 1,
-                                         review_window_size: int = 10,
-                                         include_all_reviews: bool = True,
-                                         min_reviews_per_asin: int = 10,
-                                         max_asins: Optional[int] = None,
-                                         debug: bool = False,
-                                         rolling_window_sizes: list[int] = [3, 5, 10, 30]) -> pd.DataFrame:
-        """
-        Optimized version of process_huggingface_only that processes all ASINs together.
-        
-        This method is significantly faster for large datasets as it uses a single
-        groupby operation over the entire dataset instead of processing ASINs individually.
-        """
-        logger.info(f"Processing HuggingFace data for {category} using {windowing_strategy} strategy (optimized)")
+        logger.info(f"Processing HuggingFace data for {category} using {windowing_strategy} strategy (pandas)")
         
         # Load data
         reviews_df, metadata_df = self.load_local_huggingface_data(category)
@@ -361,8 +212,8 @@ class AmazonKeepaDataPipeline:
             logger.warning(f"No data found for category {category}")
             return pd.DataFrame()
         
-        # Filter ASINs with minimum reviews
-        asin_counts = reviews_df['asin'].value_counts()
+        # Filter ASINs with minimum reviews - use parent_asin for consistency
+        asin_counts = reviews_df['parent_asin'].value_counts()
         valid_asins = asin_counts[asin_counts >= min_reviews_per_asin].index.tolist()
         
         # Limit to max_asins if specified (for debugging/testing)
@@ -370,7 +221,7 @@ class AmazonKeepaDataPipeline:
             valid_asins = valid_asins[:max_asins]
             logger.info(f"Limited to first {max_asins} ASINs for debugging/testing")
         
-        reviews_df = reviews_df[reviews_df['asin'].isin(valid_asins)]
+        reviews_df = reviews_df[reviews_df['parent_asin'].isin(valid_asins)]
         
         logger.info(f"Processing {len(valid_asins)} ASINs with at least {min_reviews_per_asin} reviews")
         
@@ -378,72 +229,189 @@ class AmazonKeepaDataPipeline:
             logger.warning("No ASINs meet the minimum review requirement")
             return pd.DataFrame()
         
-        # Merge with metadata
-        reviews_df = reviews_df.merge(metadata_df, on='asin', how='left')
+        # Merge with metadata - use parent_asin for joining
+        if not metadata_df.empty and 'parent_asin' in metadata_df.columns:
+            reviews_df = reviews_df.merge(metadata_df, on='parent_asin', how='left')
+        else:
+            logger.warning("No metadata available or missing parent_asin column, processing without metadata")
+        
+        # Rename columns 
+        # title -> review_title, title_right -> product_name
+        column_renames = {}
+        if 'title_right' in reviews_df.columns:
+            column_renames['title_right'] = 'product_name'
+        if 'images_right' in reviews_df.columns:
+            column_renames['images_right'] = 'product_images'
+        if 'images' in reviews_df.columns:
+            column_renames['images'] = 'review_images'
+        if 'videos' in reviews_df.columns:
+            column_renames['videos'] = 'product_videos'
+        if 'title' in reviews_df.columns:
+            column_renames['title'] = 'review_title'
+        
+        if column_renames:
+            reviews_df = reviews_df.rename(columns=column_renames)
+        
+        # Create individual review text in specified format before aggregation
+        if all(col in reviews_df.columns for col in ['review_title', 'rating', 'helpful_vote', 'text', 'verified_purchase']):
+            reviews_df['formatted_review_text'] = (
+                r"<\ begin review \> title: " +
+                reviews_df['review_title'].fillna('').astype(str) +
+                " || rating: " +
+                reviews_df['rating'].astype(str) +
+                " || helpful votes: " +
+                reviews_df['helpful_vote'].fillna(0).astype(str) +
+                " || content: " +
+                reviews_df['text'].fillna('').astype(str) +
+                " || verified purchase: " +
+                reviews_df['verified_purchase'].fillna(False).astype(str) +
+                r" <\ end review \> "
+            )
         
         # Create window labels based on strategy
+        # Convert polars interval to pandas frequency string
+        def polars_to_pandas_freq(interval: str) -> str:
+            """Convert polars interval to pandas frequency string."""
+            interval = interval.lower()
+            if interval.endswith('d'):
+                return interval.upper()  # '1d' -> '1D'
+            elif interval.endswith('m'):
+                return interval.replace('m', 'min')  # '1m' -> '1min' (minutes)
+            elif interval.endswith('mo'):
+                return interval.replace('mo', 'M')  # '1mo' -> '1M' (months)
+            elif interval.endswith('w'):
+                return interval.upper()  # '1w' -> '1W'
+            elif interval.endswith('h'):
+                return interval.upper()  # '1h' -> '1H'
+            elif interval.endswith('s'):
+                return interval.upper()  # '1s' -> '1S'
+            elif interval.endswith('y'):
+                return interval.replace('y', 'Y')  # '1y' -> '1Y'
+            elif interval.endswith('q'):
+                return interval.replace('q', 'Q')  # '1q' -> '1Q'
+            else:
+                return interval.upper()  # fallback
+        
+        pandas_freq = polars_to_pandas_freq(calendar_window_interval)
+        
         if windowing_strategy == "calendar":
-            # Create calendar windows
-            reviews_df['window_start'] = reviews_df['datetime'].dt.floor(f'{calendar_window_days}D')
-            group_cols = ['asin', 'window_start']
+            if upsample:
+                # For upsampling, we need to create a full time range and join
+                logger.info(f"Creating upsampled time series with {calendar_window_interval} windows")
+                # Get the full date range for all ASINs
+                min_date = reviews_df['datetime'].min()
+                max_date = reviews_df['datetime'].max()
+                
+                # Create full time range
+                time_range = pd.date_range(start=min_date, end=max_date, freq=pandas_freq)
+                
+                # Create skeleton DataFrame with all ASINs and time periods
+                skeleton_data = []
+                for asin in reviews_df['parent_asin'].unique():
+                    for timestamp in time_range:
+                        skeleton_data.append({
+                            'parent_asin': asin,
+                            'window_start': timestamp
+                        })
+                skeleton_df = pd.DataFrame(skeleton_data)
+                
+                # Add window_start to original data
+                reviews_df['window_start'] = reviews_df['datetime'].dt.floor(pandas_freq)
+                
+                # Join skeleton with original data to create full time series
+                reviews_df = skeleton_df.merge(
+                    reviews_df, 
+                    on=['parent_asin', 'window_start'], 
+                    how='left'
+                )
+                
+                logger.info(f"Upsampling created {len(reviews_df)} records (including empty windows)")
+                group_cols = ['parent_asin', 'window_start']
+            else:
+                # Only process existing data buckets (no upsampling)
+                reviews_df['window_start'] = reviews_df['datetime'].dt.floor(pandas_freq)
+                group_cols = ['parent_asin', 'window_start']
         elif windowing_strategy == "review_frequency":
             # Create review frequency windows
-            reviews_df = reviews_df.sort_values(['asin', 'datetime'])
-            reviews_df['window_id'] = reviews_df.groupby('asin').cumcount() // review_window_size
-            group_cols = ['asin', 'window_id']
+            reviews_df = reviews_df.sort_values(['parent_asin', 'datetime'])
+            reviews_df['window_id'] = reviews_df.groupby('parent_asin').cumcount() // review_window_size
+            group_cols = ['parent_asin', 'window_id']
         else:
             raise ValueError(f"Unsupported windowing strategy: {windowing_strategy}")
         
         # Define aggregations
         agg_dict = {
             'rating': 'mean',
-            'asin': 'count',  # This will count reviews per window
+            'parent_asin': 'count',  # This will count reviews per window
         }
         
-        # Add optional columns if they exist
-        if 'helpful_votes' in reviews_df.columns:
-            agg_dict['helpful_votes'] = 'sum'
-        if 'verified_purchase' in reviews_df.columns:
-            agg_dict['verified_purchase'] = 'mean'
+        # Add weighted averages for helpful_vote and verified_purchase
+        def helpful_vote_weighted_avg(group):
+            if 'helpful_vote' in group.columns and 'rating' in group.columns:
+                helpful_votes = group['helpful_vote'].fillna(0)
+                ratings = group['rating']
+                if helpful_votes.sum() > 0:
+                    return (helpful_votes * ratings).sum() / helpful_votes.sum()
+            return None
+            
+        def verified_purchase_weighted_avg(group):
+            if 'verified_purchase' in group.columns and 'rating' in group.columns:
+                verified = group['verified_purchase'].fillna(False).astype(int)
+                ratings = group['rating']
+                if verified.sum() > 0:
+                    return (verified * ratings).sum() / verified.sum()
+            return None
         
-        # Add metadata columns to aggregation
-        agg_dict.update({
-            'title': 'first',
-            'category': 'first', 
-            'brand': 'first',
-            'price': 'first',
-            'avg_rating': 'first',
-            'rating_count': 'first'
-        })
+        # Add metadata columns to aggregation - use correct column names
+        # Check if columns exist before adding them to avoid errors
+        metadata_cols = ['product_name', 'main_category', 'categories', 'brand', 'store', 'price', 
+                        'description', 'features', 'average_rating', 'window_rating_count']
+        
+        for col in metadata_cols:
+            if col in reviews_df.columns:
+                agg_dict[col] = 'first'
+        
+        # Handle formatted review text aggregation
+        if 'formatted_review_text' in reviews_df.columns:
+            agg_dict['formatted_review_text'] = lambda x: ''.join(x.dropna().astype(str))
         
         # Perform groupby aggregation
         grouped = reviews_df.groupby(group_cols)
         aggregated = grouped.agg(agg_dict)
         
+        # Add weighted averages using custom functions
+        aggregated['helpful_vote_weighted_avg_rating'] = grouped.apply(helpful_vote_weighted_avg)
+        aggregated['verified_purchase_weighted_avg_rating'] = grouped.apply(verified_purchase_weighted_avg)
+        
         # Rename columns
         aggregated = aggregated.rename(columns={
             'rating': 'avg_rating_window',
-            'asin': 'review_count_window',
-            'helpful_votes': 'helpful_votes_sum',
-            'verified_purchase': 'verified_purchases_ratio',
-            'title': 'title',
-            'category': 'category',
-            'brand': 'brand',
-            'price': 'price_metadata',
-            'avg_rating': 'avg_rating_metadata',
-            'rating_count': 'rating_count_metadata'
+            'parent_asin': 'review_count_window',
+            'formatted_review_text': 'aggregated_reviews'
         })
         
-        # Handle review text aggregation
-        if include_all_reviews:
-            text_agg = grouped['text'].apply(lambda x: ' ||| '.join(x.dropna().astype(str)) if not x.empty else '')
-            aggregated['review_text'] = text_agg.str[:5000]
-        else:
-            text_agg = grouped['text'].first()
-            aggregated['review_text'] = text_agg.str[:500] if text_agg is not None else ''
+        # Handle list columns by converting to strings
+        list_columns = ['categories', 'features', 'description']
+        for col in list_columns:
+            if col in aggregated.columns:
+                # Convert list columns to string by joining with ', '
+                aggregated[f'{col}_str'] = aggregated[col].apply(
+                    lambda x: ', '.join(x) if isinstance(x, list) else str(x) if x is not None else ''
+                )
+            else:
+                aggregated[f'{col}_str'] = ''
         
-        # Note: window_size, windowing_strategy, and include_all_reviews are stored in config metadata
-        # and don't need to be in every observation
+        # Create the final combined text column in the specified format
+        aggregated['combined_text'] = (
+            "product name: " + aggregated.get('product_name', '').fillna('').astype(str) +
+            "\nproduct categories: " + aggregated.get('categories_str', '').fillna('').astype(str) +
+            "\n2023 price: " + aggregated.get('price', '').fillna('').astype(str) +
+            "\nbrand: " + aggregated.get('brand', '').fillna('').astype(str) +
+            "\nseller: " + aggregated.get('store', '').fillna('').astype(str) +
+            "\nproduct description: " + aggregated.get('description_str', '').fillna('').astype(str) +
+            "\nreviews: " + aggregated.get('aggregated_reviews', '').fillna('').astype(str) +
+            "\nproduct features: " + aggregated.get('features_str', '').fillna('').astype(str)
+        )
         
         # Add date columns
         if windowing_strategy == "calendar":
@@ -459,18 +427,19 @@ class AmazonKeepaDataPipeline:
             aggregated['year'] = aggregated['timestamp'].dt.year
             aggregated['month'] = aggregated['timestamp'].dt.month
         
-        # Reset index
-        aggregated = aggregated.reset_index(drop=True)
+        # Add avg_review_count_per_interval for calendar windows
+        if windowing_strategy == "calendar":
+            aggregated['avg_review_count_per_interval'] = aggregated['review_count_window']
         
-        # Fill NaN values
-        aggregated = aggregated.fillna({
-            'avg_rating_window': pd.NA,
-            'helpful_votes_sum': 0,
-            'verified_purchases_ratio': 0.0,
-            'review_text': ''
-        })
+        # Reset index and add ASIN column
+        aggregated = aggregated.reset_index()
+        aggregated['asin'] = aggregated['parent_asin']
+        aggregated = aggregated.drop(columns=['parent_asin'])
         
-        # Add rolling statistics for calendar windows
+        # Add rolling statistics first (we need review_count_window for calculations)
+        # Note: We use both types of rolling statistics for different purposes:
+        # 1. Time-based rolling (7d, 30d, 90d) - for calendar windows only
+        # 2. Window-count-based rolling (3w, 5w, 10w, 30w) - for both calendar and review frequency windows
         if windowing_strategy == "calendar" and not aggregated.empty:
             try:
                 aggregated = self._add_rolling_statistics(aggregated)
@@ -484,25 +453,41 @@ class AmazonKeepaDataPipeline:
                     logger.warning(f"Error adding rolling statistics: {e}")
                     logger.info("Continuing without rolling statistics")
         
-        aggregated = self._drop_metadata_columns(aggregated)
         aggregated = self._add_rolling_window_statistics(aggregated, rolling_window_sizes)
-        logger.info(f"Generated {len(aggregated)} records from {len(valid_asins)} ASINs")
+        
+        # Select only the columns we want to keep 
+        # Keep base columns and all rolling statistics
+        base_columns = ['asin', 'timestamp', 'date', 'year', 'month', 'combined_text', 'review_count_window', 'avg_review_count_per_interval',
+                       'avg_rating_window', 'helpful_vote_weighted_avg_rating', 'verified_purchase_weighted_avg_rating']
+        
+        # Add all rolling columns
+        rolling_columns = [col for col in aggregated.columns if col.startswith('rolling_')]
+        columns_to_keep = base_columns + rolling_columns
+        
+        # Keep only the columns we want
+        available_columns = [col for col in columns_to_keep if col in aggregated.columns]
+        aggregated = aggregated[available_columns]
+        logger.info(f"Generated {len(aggregated)} records from {len(valid_asins)} ASINs (pandas)")
         return aggregated
-
+    
     def process_huggingface_only_polars(self, category: str, 
                                        windowing_strategy: str = "calendar",
-                                       calendar_window_days: int = 1,
+                                       calendar_window_interval: str = "1d",
                                        review_window_size: int = 10,
                                        include_all_reviews: bool = True,
                                        min_reviews_per_asin: int = 10,
                                        max_asins: Optional[int] = None,
                                        debug: bool = False,
-                                       rolling_window_sizes: list[int] = [3, 5, 10, 30]) -> pd.DataFrame:
+                                       rolling_window_sizes: list[int] = [3, 5, 10, 30],
+                                       upsample: bool = False) -> pd.DataFrame:
         """
         Polars-based implementation of process_huggingface_only for better performance.
         
         This method uses Polars for faster data processing, especially beneficial
         for large datasets with millions of reviews.
+        
+        Note: Images and videos are ignored for now but could be included later
+        when expanding to vision as another modality.
         """
         try:
             import polars as pl
@@ -552,18 +537,93 @@ class AmazonKeepaDataPipeline:
         else:
             logger.warning("No metadata available, processing without metadata")
         
+        # Rename columns as specified by user
+        # title -> review_title, title_right -> product_name
+        column_renames = {}
+        if 'title_right' in reviews_pl.columns:
+            column_renames['title_right'] = 'product_name'
+        if 'images_right' in reviews_pl.columns:
+            column_renames['images_right'] = 'product_images'
+        if 'images' in reviews_pl.columns:
+            column_renames['images'] = 'review_images'
+        if 'videos' in reviews_pl.columns:
+            column_renames['videos'] = 'product_videos'
+        if 'title' in reviews_pl.columns:
+            column_renames['title'] = 'review_title'
+        
+        if column_renames:
+            reviews_pl = reviews_pl.rename(column_renames)
+        
+        # Create individual review text in specified format before aggregation
+        review_text_cols = []
+        for col in ['review_title', 'rating', 'helpful_vote', 'text', 'verified_purchase']:
+            if col in reviews_pl.columns:
+                review_text_cols.append(col)
+        
+        if review_text_cols:
+            # Create formatted review text for each review
+            reviews_pl = reviews_pl.with_columns([
+                pl.concat_str([
+                    pl.lit(r"<\ begin review \> title: "),
+                    pl.col('review_title').fill_null(''),
+                    pl.lit(" || rating: "),
+                    pl.col('rating').cast(pl.Utf8),
+                    pl.lit(" || helpful votes: "),
+                    pl.col('helpful_vote').fill_null(0).cast(pl.Utf8),
+                    pl.lit(" || content: "),
+                    pl.col('text').fill_null(''),
+                    pl.lit(" || verified purchase: "),
+                    pl.col('verified_purchase').fill_null(False).cast(pl.Utf8),
+                    pl.lit(r" <\ end review \> ")
+                ]).alias('formatted_review_text')
+            ])
+        
         # Create window labels based on strategy
         if windowing_strategy == "calendar":
-            # Create calendar windows using Polars date functions
-            reviews_pl = reviews_pl.with_columns([
-                pl.col('datetime').dt.truncate(f'{calendar_window_days}d').alias('window_start')
-            ])
+            if upsample:
+                # For upsampling, we need to create a full time range and join
+                # Get the full date range for all ASINs
+                min_date = reviews_pl.select(pl.col('datetime').min()).item()
+                max_date = reviews_pl.select(pl.col('datetime').max()).item()
+                
+                # Create full time range
+                time_range = pl.datetime_range(
+                    start=min_date,
+                    end=max_date,
+                    interval=calendar_window_interval
+                )
+                
+                # Create skeleton DataFrame with all ASINs and time periods
+                skeleton = pl.DataFrame({
+                    'window_start': time_range
+                }).join(
+                    reviews_pl.select('parent_asin').unique(),
+                    how='cross'
+                )
+                
+                # Join with original data
+                reviews_pl = skeleton.join(
+                    reviews_pl.with_columns([
+                        pl.col('datetime').dt.truncate(calendar_window_interval).alias('window_start')
+                    ]),
+                    on=['parent_asin', 'window_start'],
+                    how='left'
+                )
+            else:
+                # Only process existing data buckets (no upsampling)
+                reviews_pl = reviews_pl.with_columns([
+                    pl.col('datetime').dt.truncate(calendar_window_interval).alias('window_start')
+                ])
+            
             group_cols = ['parent_asin', 'window_start']
         elif windowing_strategy == "review_frequency":
             # Create review frequency windows
             reviews_pl = reviews_pl.sort(['parent_asin', 'datetime'])
             reviews_pl = reviews_pl.with_columns([
-                (pl.col('row_nr').over('parent_asin') // review_window_size).alias('window_id')
+                pl.int_range(pl.len()).over('parent_asin').alias('row_nr')
+            ])
+            reviews_pl = reviews_pl.with_columns([
+                (pl.col('row_nr') // review_window_size).alias('window_id')
             ])
             group_cols = ['parent_asin', 'window_id']
         else:
@@ -575,58 +635,84 @@ class AmazonKeepaDataPipeline:
             pl.col('parent_asin').len().alias('review_count_window'),
         ]
         
-        # Add optional columns if they exist
-        if 'helpful_vote' in reviews_pl.columns:
-            agg_exprs.append(pl.col('helpful_vote').sum().alias('helpful_votes_sum'))
+        # Add weighted averages for helpful_vote and verified_purchase
+        if 'helpful_vote' in reviews_pl.columns and 'rating' in reviews_pl.columns:
+            # Helpful vote weighted average rating (only considering reviews with helpful votes > 0)
+            agg_exprs.append(
+                pl.when(pl.col('helpful_vote').sum() > 0)
+                .then((pl.col('helpful_vote') * pl.col('rating')).sum() / pl.col('helpful_vote').sum())
+                .otherwise(None)
+                .alias('helpful_vote_weighted_avg_rating')
+            )
         else:
-            agg_exprs.append(pl.lit(0).alias('helpful_votes_sum'))
+            agg_exprs.append(pl.lit(None).alias('helpful_vote_weighted_avg_rating'))
             
-        if 'verified_purchase' in reviews_pl.columns:
-            agg_exprs.append(pl.col('verified_purchase').mean().alias('verified_purchases_ratio'))
+        if 'verified_purchase' in reviews_pl.columns and 'rating' in reviews_pl.columns:
+            # Verified purchase weighted average rating (only considering verified purchases)
+            agg_exprs.append(
+                pl.when(pl.col('verified_purchase').sum() > 0)
+                .then((pl.col('verified_purchase').cast(pl.Float64) * pl.col('rating')).sum() / pl.col('verified_purchase').sum())
+                .otherwise(None)
+                .alias('verified_purchase_weighted_avg_rating')
+            )
         else:
-            agg_exprs.append(pl.lit(0.0).alias('verified_purchases_ratio'))
+            agg_exprs.append(pl.lit(None).alias('verified_purchase_weighted_avg_rating'))
         
         # Add metadata columns - use correct column names from metadata
         # Check if columns exist before adding them to avoid errors
-        if 'title' in reviews_pl.columns:
-            agg_exprs.append(pl.col('title').first().alias('title'))
+        if 'product_name' in reviews_pl.columns:
+            agg_exprs.append(pl.col('product_name').first().alias('product_name'))
         else:
-            agg_exprs.append(pl.lit('').alias('title'))
+            agg_exprs.append(pl.lit('').alias('product_name'))
             
         if 'main_category' in reviews_pl.columns:
-            agg_exprs.append(pl.col('main_category').first().alias('category'))
+            agg_exprs.append(pl.col('main_category').first().alias('main_category'))
         else:
-            agg_exprs.append(pl.lit(category).alias('category'))
+            agg_exprs.append(pl.lit(category).alias('main_category'))
+            
+        if 'categories' in reviews_pl.columns:
+            agg_exprs.append(pl.col('categories').first().alias('categories'))
+        else:
+            agg_exprs.append(pl.lit('').alias('categories'))
             
         if 'brand' in reviews_pl.columns:
             agg_exprs.append(pl.col('brand').first().alias('brand'))
         else:
             agg_exprs.append(pl.lit('').alias('brand'))
             
-        if 'price' in reviews_pl.columns:
-            agg_exprs.append(pl.col('price').first().alias('price_metadata'))
+        if 'store' in reviews_pl.columns:
+            agg_exprs.append(pl.col('store').first().alias('store'))
         else:
-            agg_exprs.append(pl.lit('').alias('price_metadata'))
+            agg_exprs.append(pl.lit('').alias('store'))
+            
+        if 'price' in reviews_pl.columns:
+            agg_exprs.append(pl.col('price').first().alias('price'))
+        else:
+            agg_exprs.append(pl.lit('').alias('price'))
+            
+        if 'description' in reviews_pl.columns:
+            agg_exprs.append(pl.col('description').first().alias('description'))
+        else:
+            agg_exprs.append(pl.lit('').alias('description'))
+            
+        if 'features' in reviews_pl.columns:
+            agg_exprs.append(pl.col('features').first().alias('features'))
+        else:
+            agg_exprs.append(pl.lit('').alias('features'))
             
         if 'average_rating' in reviews_pl.columns:
             agg_exprs.append(pl.col('average_rating').first().alias('avg_rating_metadata'))
         else:
             agg_exprs.append(pl.lit(None).alias('avg_rating_metadata'))
-            
-        if 'rating_number' in reviews_pl.columns:
-            agg_exprs.append(pl.col('rating_number').first().alias('rating_count_metadata'))
-        else:
-            agg_exprs.append(pl.lit(None).alias('rating_count_metadata'))
+
         
-        # Handle review text aggregation
-        if include_all_reviews:
+        # Handle review text aggregation - combine all formatted review texts
+        if 'formatted_review_text' in reviews_pl.columns:
             agg_exprs.append(
-                pl.col('text').drop_nulls().cast(pl.Utf8).str.join(' ||| ').str.slice(0, 5000).alias('review_text')
+                pl.col('formatted_review_text').drop_nulls().str.join('').alias('aggregated_reviews')
             )
         else:
-            agg_exprs.append(
-                pl.col('text').first().str.slice(0, 500).alias('review_text')
-            )
+            agg_exprs.append(pl.lit('').alias('aggregated_reviews'))
         
         # Add timestamp column - ensure we get a single value, not a list
         if windowing_strategy == "calendar":
@@ -642,11 +728,35 @@ class AmazonKeepaDataPipeline:
             pl.col('parent_asin').alias('asin')
         ])
         
-        # Add configuration metadata
+        # Create the final combined text column in the specified format
+
+        # Convert any list[str] columns to string by joining with ', ' before concatenation
         aggregated = aggregated.with_columns([
-            pl.lit(calendar_window_days if windowing_strategy == "calendar" else review_window_size).alias('window_size'),
-            pl.lit(windowing_strategy).alias('windowing_strategy'),
-            pl.lit(include_all_reviews).alias('include_all_reviews')
+            pl.col('categories').list.join(', ').alias('categories_str'),
+            pl.col('features').list.join(', ').alias('features_str'),
+            pl.col('description').list.join(', ').alias('description_str'),
+        ])
+
+        # Now build the combined_text using the stringified columns
+        aggregated = aggregated.with_columns([
+            pl.concat_str([
+                pl.lit("product name: "),
+                pl.col('product_name').fill_null(''),
+                pl.lit("\nproduct categories: "),
+                pl.col('categories_str').fill_null(''),
+                pl.lit("\n2023 price: "),
+                pl.col('price').fill_null(''),
+                pl.lit("\nbrand: "),
+                pl.col('brand').fill_null(''),
+                pl.lit("\nseller: "),
+                pl.col('store').fill_null(''),
+                pl.lit("\nproduct description: "),
+                pl.col('description_str').fill_null(''),
+                pl.lit("\nreviews: "),
+                pl.col('aggregated_reviews').fill_null(''),
+                pl.lit("\nproduct features: "),
+                pl.col('features_str').fill_null('')
+            ]).alias('combined_text')
         ])
         
         # Add date columns
@@ -656,20 +766,22 @@ class AmazonKeepaDataPipeline:
             pl.col('timestamp').dt.month().alias('month')
         ])
         
-        # Fill NaN values - only fill non-nullable columns
-        aggregated = aggregated.with_columns([
-            pl.col('helpful_votes_sum').fill_null(0),
-            pl.col('verified_purchases_ratio').fill_null(0.0),
-            pl.col('review_text').fill_null('')
-        ])
+        # Add avg_review_count_per_interval for calendar windows
+        if windowing_strategy == "calendar":
+            aggregated = aggregated.with_columns([
+                pl.col('review_count_window').alias('avg_review_count_per_interval')
+            ])
         
         # Convert back to pandas for consistency
         result_df = aggregated.to_pandas()
         
-        # Add rolling statistics for calendar windows
+        # Add rolling statistics first (we need review_count_window for calculations)
+        # Note: We use both types of rolling statistics for different purposes:
+        # 1. Time-based rolling (7d, 30d, 90d) - for calendar windows only
+        # 2. Window-count-based rolling (3w, 5w, 10w, 30w) - for both calendar and review frequency windows
         if windowing_strategy == "calendar" and not result_df.empty:
             try:
-                result_df = self._add_rolling_statistics(result_df)
+                result_df = self._add_rolling_statistics_polars(result_df, calendar_window_interval)
             except Exception as e:
                 if debug:
                     logger.error(f"Error adding rolling statistics: {e}")
@@ -680,8 +792,20 @@ class AmazonKeepaDataPipeline:
                     logger.warning(f"Error adding rolling statistics: {e}")
                     logger.info("Continuing without rolling statistics")
         
-        result_df = self._drop_metadata_columns(result_df)
         result_df = self._add_rolling_window_statistics(result_df, rolling_window_sizes)
+        
+        # Select only the columns we want to keep
+        # Keep base columns and all rolling statistics
+        base_columns = ['asin', 'timestamp', 'date', 'year', 'month', 'combined_text', 'review_count_window', 'avg_review_count_per_interval',
+                       'avg_rating_window', 'helpful_vote_weighted_avg_rating', 'verified_purchase_weighted_avg_rating']
+        
+        # Add all rolling columns
+        rolling_columns = [col for col in result_df.columns if col.startswith('rolling_')]
+        columns_to_keep = base_columns + rolling_columns
+        
+        # Keep only the columns we want
+        available_columns = [col for col in columns_to_keep if col in result_df.columns]
+        result_df = result_df[available_columns]
         logger.info(f"Generated {len(result_df)} records from {len(valid_asins)} ASINs (Polars)")
         return result_df
     
@@ -689,7 +813,7 @@ class AmazonKeepaDataPipeline:
                                                   product_title: str, product_category: str,
                                                   product_brand: str, product_price: str,
                                                   avg_rating: float, rating_count: int,
-                                                  calendar_window_days: int, include_all_reviews: bool) -> pd.DataFrame:
+                                                  calendar_window_days: int, include_all_reviews: bool, upsample: bool = False) -> pd.DataFrame:
         """Process calendar windows for HuggingFace-only data using groupby aggregations."""
         if asin_reviews.empty:
             return pd.DataFrame()
@@ -700,7 +824,15 @@ class AmazonKeepaDataPipeline:
             asin_reviews_copy = asin_reviews_copy.set_index('datetime')
             
             # Resample to calendar windows
-            resampled = asin_reviews_copy.resample(f'{calendar_window_days}D')
+            if upsample:
+                # Create full time range and resample (includes empty buckets)
+                resampled = asin_reviews_copy.resample(f'{calendar_window_days}D')
+            else:
+                # Only process existing data buckets (no upsampling)
+                # Group by truncated datetime to avoid creating empty buckets
+                asin_reviews_copy['window_start'] = asin_reviews_copy.index.floor(f'{calendar_window_days}D')
+                grouped = asin_reviews_copy.groupby('window_start')
+                resampled = grouped
             
             # Define aggregations
             agg_dict = {
@@ -745,7 +877,10 @@ class AmazonKeepaDataPipeline:
             aggregated['include_all_reviews'] = include_all_reviews
             
             # Reset index to make datetime a column
-            aggregated = aggregated.reset_index().rename(columns={'datetime': 'timestamp'})
+            if upsample:
+                aggregated = aggregated.reset_index().rename(columns={'datetime': 'timestamp'})
+            else:
+                aggregated = aggregated.reset_index().rename(columns={'window_start': 'timestamp'})
             
             # Add date columns from timestamp
             aggregated['date'] = aggregated['timestamp'].dt.date
@@ -923,13 +1058,11 @@ class AmazonKeepaDataPipeline:
         })
         
         return aggregated
-    
 
-    
     def combine_datasets(self, category: str, time_window_days: int = 30, 
                         include_all_reviews: bool = True, 
                         windowing_strategy: str = "calendar",
-                        calendar_window_days: int = 1,
+                        calendar_window_interval: str = "1d",
                         review_window_size: int = 10,
                         debug: bool = False) -> pd.DataFrame:
         """
@@ -1016,7 +1149,7 @@ class AmazonKeepaDataPipeline:
                         combined_records.extend(self._process_calendar_windows(
                             asin, price_df, asin_reviews, product_title, product_category,
                             product_brand, product_price, avg_rating, rating_count,
-                            calendar_window_days, include_all_reviews
+                            calendar_window_interval, include_all_reviews
                         ))
                     elif windowing_strategy == "review_frequency":
                         combined_records.extend(self._process_review_frequency_windows(
@@ -1257,7 +1390,7 @@ class AmazonKeepaDataPipeline:
         return record
     
     def _add_rolling_statistics(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add rolling statistics for calendar windows."""
+        """Add rolling statistics for calendar windows (legacy method for backward compatibility)."""
         logger.info("Adding rolling statistics for calendar windows")
         
         # Sort by ASIN and timestamp
@@ -1278,10 +1411,16 @@ class AmazonKeepaDataPipeline:
                     window=window_days, min_periods=1
                 ).mean()
                 
-                # Calculate rolling review counts
-                asin_data[f'rolling_review_count_{window_days}d'] = asin_data['review_count_window'].rolling(
-                    window=window_days, min_periods=1
-                ).sum()
+                # Calculate rolling review counts (total reviews over rolling window)
+                if 'review_count_window' in asin_data.columns:
+                    asin_data[f'rolling_review_count_{window_days}d'] = asin_data['review_count_window'].rolling(
+                        window=window_days, min_periods=1
+                    ).sum()
+                    
+                    # Calculate rolling average reviews per day (total reviews / window days)
+                    asin_data[f'rolling_avg_reviews_per_day_{window_days}d'] = (
+                        asin_data['review_count_window'].rolling(window=window_days, min_periods=1).sum() / window_days
+                    )
                 
                 # Calculate rolling helpful votes (only if column exists)
                 if 'helpful_votes_sum' in asin_data.columns:
@@ -1299,6 +1438,57 @@ class AmazonKeepaDataPipeline:
                             window=window_days, min_periods=1
                         ).sum()
                     ).fillna(0)
+            
+            rolling_stats.append(asin_data)
+        
+        # Combine all ASINs back together
+        result_df = pd.concat(rolling_stats, ignore_index=True)
+        
+        logger.info(f"Added rolling statistics with windows: 7, 30, 90 days")
+        return result_df
+
+    def _add_rolling_statistics_polars(self, df: pd.DataFrame, calendar_window_interval: str) -> pd.DataFrame:
+        """Add rolling statistics for calendar windows in Polars implementation."""
+        logger.info("Adding rolling statistics for calendar windows (Polars)")
+        
+        # Sort by ASIN and timestamp
+        df = df.sort_values(['asin', 'timestamp']).copy()
+        
+        # Calculate rolling statistics for each ASIN
+        rolling_stats = []
+        
+        for asin in df['asin'].unique():
+            asin_data = df[df['asin'] == asin].copy()
+            
+            # Rolling window sizes (in days)
+            windows = [7, 30, 90]  # 1 week, 1 month, 3 months
+            
+            for window_days in windows:
+                # Calculate rolling averages for ratings
+                asin_data[f'rolling_avg_rating_{window_days}d'] = asin_data['avg_rating_window'].rolling(
+                    window=window_days, min_periods=1
+                ).mean()
+                
+                # Calculate rolling review counts (total reviews over rolling window)
+                asin_data[f'rolling_review_count_{window_days}d'] = asin_data['review_count_window'].rolling(
+                    window=window_days, min_periods=1
+                ).sum()
+                
+                # Calculate rolling average reviews per day (total reviews / window days)
+                asin_data[f'rolling_avg_reviews_per_day_{window_days}d'] = (
+                    asin_data['review_count_window'].rolling(window=window_days, min_periods=1).sum() / window_days
+                )
+                
+                # Calculate rolling weighted averages for helpful votes and verified purchases
+                if 'helpful_vote_weighted_avg_rating' in asin_data.columns:
+                    asin_data[f'rolling_helpful_vote_weighted_avg_{window_days}d'] = asin_data['helpful_vote_weighted_avg_rating'].rolling(
+                        window=window_days, min_periods=1
+                    ).mean()
+                
+                if 'verified_purchase_weighted_avg_rating' in asin_data.columns:
+                    asin_data[f'rolling_verified_purchase_weighted_avg_{window_days}d'] = asin_data['verified_purchase_weighted_avg_rating'].rolling(
+                        window=window_days, min_periods=1
+                    ).mean()
             
             rolling_stats.append(asin_data)
         
@@ -1345,6 +1535,12 @@ class AmazonKeepaDataPipeline:
         output_paths['parquet'] = parquet_path
         logger.info(f"Saved Parquet: {parquet_path}")
         
+        # For HuggingFace-only datasets, save metadata separately
+        if config_metadata and config_metadata.get('data_source') == 'huggingface_only':
+            metadata_path = self._save_product_metadata(df, category, output_dir, base_name)
+            if metadata_path:
+                output_paths['metadata'] = metadata_path
+        
         # Create summary with configuration metadata
         summary = {
             'created_at': datetime.now().isoformat(),
@@ -1361,6 +1557,11 @@ class AmazonKeepaDataPipeline:
                 'timepoints_with_reviews': f"{(df['review_count_window'] > 0).mean():.1%}"
             }
         }
+        
+        # Add metadata file information for HuggingFace-only datasets
+        if config_metadata and config_metadata.get('data_source') == 'huggingface_only':
+            summary['metadata_file'] = f"{base_name}_metadata.parquet"
+            summary['note'] = "Product metadata (title, category, brand, etc.) has been moved to a separate metadata file to reduce redundancy"
         
         # Add price data coverage only if price columns exist
         price_columns = ['amazon_price', 'new_price', 'used_price']
@@ -1384,6 +1585,74 @@ class AmazonKeepaDataPipeline:
         logger.info(f"Saved summary: {summary_path}")
         
         return output_paths
+
+    def _save_product_metadata(self, df: pd.DataFrame, category: str, output_dir: Path, base_name: str) -> Optional[Path]:
+        """
+        Save product metadata separately for HuggingFace-only datasets.
+        
+        Args:
+            df: DataFrame containing the processed data
+            category: Product category
+            output_dir: Directory to save metadata
+            base_name: Base name for the file
+            
+        Returns:
+            Path to the saved metadata file, or None if no metadata to save
+        """
+        # Load original metadata to get complete product information
+        try:
+            _, metadata_df = self.load_local_huggingface_data(category)
+            if metadata_df.empty:
+                logger.warning("No metadata available to save separately")
+                return None
+            
+            # Get unique ASINs from the processed data
+            unique_asins = df['asin'].unique()
+            
+            # Filter metadata to only include ASINs in the processed data
+            # Use parent_asin for joining since that's what we used in processing
+            if 'parent_asin' in metadata_df.columns:
+                product_metadata = metadata_df[metadata_df['parent_asin'].isin(unique_asins)].copy()
+                product_metadata = product_metadata.drop_duplicates(subset=['parent_asin'])
+                
+                # Drop existing 'asin' column if it exists to avoid duplicates
+                if 'asin' in product_metadata.columns:
+                    product_metadata = product_metadata.drop(columns=['asin'])
+                
+                # Rename parent_asin to asin for consistency
+                product_metadata = product_metadata.rename(columns={'parent_asin': 'asin'})
+                
+                # Select relevant columns
+                metadata_columns = ['asin', 'title', 'main_category', 'brand', 'price', 'average_rating', 'rating_number']
+                available_columns = [col for col in metadata_columns if col in product_metadata.columns]
+                
+                if available_columns:
+                    product_metadata = product_metadata[available_columns]
+                    
+                    # Rename columns to match the expected format
+                    column_mapping = {
+                        'main_category': 'category',
+                        'price': 'price_metadata',
+                        'average_rating': 'avg_rating_metadata',
+                        'rating_number': 'rating_count_metadata'
+                    }
+                    product_metadata = product_metadata.rename(columns=column_mapping)
+                    
+                    # Save metadata
+                    metadata_path = output_dir / f"{base_name}_metadata.parquet"
+                    product_metadata.to_parquet(metadata_path, index=False)
+                    logger.info(f"Saved product metadata: {metadata_path} ({len(product_metadata)} products)")
+                    return metadata_path
+                else:
+                    logger.warning("No relevant metadata columns found")
+                    return None
+            else:
+                logger.warning("No parent_asin column in metadata")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Could not save product metadata: {e}")
+            return None
 
     def get_available_categories(self) -> List[str]:
         """Get available Amazon product categories from the all_categories.txt file."""
@@ -1466,9 +1735,23 @@ class AmazonKeepaDataPipeline:
 
     def _drop_metadata_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """Remove metadata columns that are redundant (in config)."""
-        for col in ['window_size', 'windowing_strategy', 'include_all_reviews']:
+        # Remove configuration metadata columns
+        config_cols = ['window_size', 'windowing_strategy', 'include_all_reviews']
+        for col in config_cols:
             if col in df.columns:
                 df = df.drop(columns=[col])
+        
+        # Remove redundant product metadata columns that are identical across all observations for a given ASIN
+        # These should be stored in metadata files instead of repeated in every row
+        redundant_metadata_cols = [
+            'title', 'category', 'brand', 'price_metadata', 
+            'avg_rating_metadata', 'rating_count_metadata'
+        ]
+        for col in redundant_metadata_cols:
+            if col in df.columns:
+                df = df.drop(columns=[col])
+                logger.info(f"Removed redundant metadata column: {col}")
+        
         return df
 
     def _add_rolling_window_statistics(self, df: pd.DataFrame, window_sizes: list[int] = [3, 5, 10, 30]) -> pd.DataFrame:
@@ -1477,13 +1760,60 @@ class AmazonKeepaDataPipeline:
         for asin in df['asin'].unique():
             asin_mask = df['asin'] == asin
             for w in window_sizes:
+                # Basic rolling statistics
                 df.loc[asin_mask, f'rolling_avg_rating_{w}w'] = (
                     df.loc[asin_mask, 'avg_rating_window'].rolling(window=w, min_periods=1).mean()
                 )
-                df.loc[asin_mask, f'rolling_review_count_{w}w'] = (
-                    df.loc[asin_mask, 'review_count_window'].rolling(window=w, min_periods=1).sum()
-                )
+                
+                # Rolling review count (total reviews over w windows)
+                if 'review_count_window' in df.columns:
+                    df.loc[asin_mask, f'rolling_review_count_{w}w'] = (
+                        df.loc[asin_mask, 'review_count_window'].rolling(window=w, min_periods=1).sum()
+                    )
+                
+                # Add rolling statistics for weighted averages if they exist
+                if 'helpful_vote_weighted_avg_rating' in df.columns:
+                    df.loc[asin_mask, f'rolling_helpful_vote_weighted_avg_{w}w'] = (
+                        df.loc[asin_mask, 'helpful_vote_weighted_avg_rating'].rolling(window=w, min_periods=1).mean()
+                    )
+                
+                if 'verified_purchase_weighted_avg_rating' in df.columns:
+                    df.loc[asin_mask, f'rolling_verified_purchase_weighted_avg_{w}w'] = (
+                        df.loc[asin_mask, 'verified_purchase_weighted_avg_rating'].rolling(window=w, min_periods=1).mean()
+                    )
         return df
+
+    def load_dataset_with_metadata(self, category: str, work_dir: Path = Path(".")) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Load a processed HuggingFace-only dataset along with its metadata file.
+        
+        Args:
+            category: Product category
+            work_dir: Working directory
+            
+        Returns:
+            Tuple of (main_dataset, metadata_dataset)
+        """
+        # Determine file paths
+        processed_dir = work_dir / "processed_datasets" / "huggingface_only"
+        main_file = processed_dir / f"{category}.parquet"
+        metadata_file = processed_dir / f"{category}_metadata.parquet"
+        
+        if not main_file.exists():
+            raise FileNotFoundError(f"Main dataset file not found: {main_file}")
+        
+        # Load main dataset
+        main_df = pd.read_parquet(main_file)
+        
+        # Load metadata if available
+        metadata_df = pd.DataFrame()
+        if metadata_file.exists():
+            metadata_df = pd.read_parquet(metadata_file)
+            logger.info(f"Loaded metadata for {len(metadata_df)} products")
+        else:
+            logger.warning(f"Metadata file not found: {metadata_file}")
+        
+        return main_df, metadata_df
 
 
 @app.command()
@@ -1529,7 +1859,7 @@ def merge_datasets(
     category: str = typer.Option("All_Beauty", help="Amazon product category"),
     windowing_strategy: str = typer.Option("price_observation", help="Windowing strategy: price_observation, calendar, or review_frequency"),
     time_window_days: int = typer.Option(30, help="Days around price observation (for price_observation strategy)"),
-    calendar_window_days: int = typer.Option(1, help="Days per calendar window (for calendar strategy)"),
+    calendar_window_interval: str = typer.Option("1d", help="Time interval per calendar window (e.g., 1d, 2M, 1w) for calendar strategy"),
     review_window_size: int = typer.Option(10, help="Reviews per window (for review_frequency strategy)"),
     include_all_reviews: bool = typer.Option(True, help="Include all reviews in time window"),
     work_dir: Path = typer.Option(".", help="Working directory"),
@@ -1549,7 +1879,7 @@ def merge_datasets(
     if windowing_strategy == "price_observation":
         strategy_desc = f"Price observation windows ({time_window_days} days around each price change)"
     elif windowing_strategy == "calendar":
-        strategy_desc = f"Calendar windows ({calendar_window_days} day intervals)"
+        strategy_desc = f"Calendar windows ({calendar_window_interval} intervals)"
     else:  # review_frequency
         strategy_desc = f"Review frequency windows (every {review_window_size} reviews)"
     
@@ -1587,17 +1917,17 @@ def merge_datasets(
         if windowing_strategy == "price_observation":
             combined_df = pipeline.combine_datasets(
                 category, time_window_days, include_all_reviews, 
-                windowing_strategy, calendar_window_days, review_window_size, debug
+                windowing_strategy, calendar_window_interval, review_window_size, debug
             )
         elif windowing_strategy == "calendar":
             combined_df = pipeline.combine_datasets(
                 category, time_window_days, include_all_reviews,
-                windowing_strategy, calendar_window_days, review_window_size, debug
+                windowing_strategy, calendar_window_interval, review_window_size, debug
             )
         else:  # review_frequency
             combined_df = pipeline.combine_datasets(
                 category, time_window_days, include_all_reviews,
-                windowing_strategy, calendar_window_days, review_window_size, debug
+                windowing_strategy, calendar_window_interval, review_window_size, debug
             )
         
         # Prepare configuration metadata
@@ -1605,7 +1935,7 @@ def merge_datasets(
             'data_source': 'keepa_huggingface_combined',
             'windowing_strategy': windowing_strategy,
             'time_window_days': time_window_days if windowing_strategy == "price_observation" else None,
-            'calendar_window_days': calendar_window_days if windowing_strategy == "calendar" else None,
+            'calendar_window_interval': calendar_window_interval if windowing_strategy == "calendar" else None,
             'review_window_size': review_window_size if windowing_strategy == "review_frequency" else None,
             'include_all_reviews': include_all_reviews
         }
@@ -1749,7 +2079,7 @@ def list_categories(
 def process_huggingface_only(
     category: str = typer.Option("All_Beauty", help="Amazon product category"),
     windowing_strategy: str = typer.Option("calendar", help="Windowing strategy: calendar or review_frequency"),
-    calendar_window_days: int = typer.Option(1, help="Days per calendar window (for calendar strategy)"),
+    calendar_window_interval: str = typer.Option("1d", help="Time interval per calendar window (e.g., 1d, 2M, 1w) for calendar strategy"),
     review_window_size: int = typer.Option(10, help="Reviews per window (for review_frequency strategy)"),
     include_all_reviews: bool = typer.Option(True, help="Include all reviews in time window"),
     min_reviews_per_asin: int = typer.Option(10, help="Minimum reviews required per ASIN"),
@@ -1757,9 +2087,9 @@ def process_huggingface_only(
     work_dir: Path = typer.Option(".", help="Working directory"),
     pull_huggingface: bool = typer.Option(False, help="Pull HuggingFace data from cloud instead of using local"),
     debug: bool = typer.Option(False, "--debug", help="Enable debug mode with full tracebacks and stop on first error"),
-    optimized: bool = typer.Option(False, "--optimized", help="Use optimized processing (single groupby over all ASINs)"),
     use_polars: bool = typer.Option(False, "--polars", help="Use Polars for faster processing (requires polars package)"),
-    rolling_window_sizes: list[int] = typer.Option([3, 5, 10, 30], help="Rolling window sizes for additional statistics")
+    rolling_window_sizes: list[int] = typer.Option([3, 5, 10, 30], help="Rolling window sizes for additional statistics"),
+    upsample: bool = typer.Option(False, "--upsample", help="Create empty buckets for missing time periods (increases row count)")
 ):
     """Process HuggingFace review data without Keepa price data.
     
@@ -1777,7 +2107,7 @@ def process_huggingface_only(
     
     # Create strategy description
     if windowing_strategy == "calendar":
-        strategy_desc = f"Calendar windows ({calendar_window_days} day intervals)"
+        strategy_desc = f"Calendar windows ({calendar_window_interval} intervals)"
     else:  # review_frequency
         strategy_desc = f"Review frequency windows (every {review_window_size} reviews)"
     
@@ -1809,32 +2139,27 @@ def process_huggingface_only(
         if use_polars:
             console.print("[bold cyan]Using Polars for processing...[/bold cyan]")
             combined_df = pipeline.process_huggingface_only_polars(
-                category, windowing_strategy, calendar_window_days, 
-                review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes
-            )
-        elif optimized:
-            console.print("[bold cyan]Using optimized processing...[/bold cyan]")
-            combined_df = pipeline.process_huggingface_only_optimized(
-                category, windowing_strategy, calendar_window_days, 
-                review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes
+                category, windowing_strategy, calendar_window_interval, 
+                review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes, upsample
             )
         else:
-            console.print("[bold cyan]Using standard processing...[/bold cyan]")
+            console.print("[bold cyan]Using pandas processing...[/bold cyan]")
             combined_df = pipeline.process_huggingface_only(
-                category, windowing_strategy, calendar_window_days, 
-                review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes
+                category, windowing_strategy, calendar_window_interval, 
+                review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes, upsample
             )
         
         # Prepare configuration metadata
         config_metadata = {
             'data_source': 'huggingface_only',
             'windowing_strategy': windowing_strategy,
-            'calendar_window_days': calendar_window_days if windowing_strategy == "calendar" else None,
+            'calendar_window_interval': calendar_window_interval if windowing_strategy == "calendar" else None,
             'review_window_size': review_window_size if windowing_strategy == "review_frequency" else None,
             'include_all_reviews': include_all_reviews,
             'min_reviews_per_asin': min_reviews_per_asin,
             'max_asins': max_asins,
-            'rolling_window_sizes': rolling_window_sizes
+            'rolling_window_sizes': rolling_window_sizes,
+            'upsample': upsample
         }
         
         # Save results using the organized data method with configuration metadata
@@ -1851,6 +2176,11 @@ def process_huggingface_only(
             console.print(f"  Unique ASINs: {combined_df['asin'].nunique():,}")
             console.print(f"  Date Range: {combined_df['timestamp'].min().date()} to {combined_df['timestamp'].max().date()}")
             console.print(f"  Average Reviews per Timepoint: {combined_df['review_count_window'].mean():.1f}")
+            
+            # Add note about metadata file
+            if 'metadata' in output_paths:
+                console.print(f"\n[bold yellow]Note:[/bold yellow] Product metadata has been saved to a separate file to reduce dataset size.")
+                console.print(f"  Use the metadata file to join product information (title, category, brand, etc.) when needed.")
                 
         except Exception as e:
             if debug:
