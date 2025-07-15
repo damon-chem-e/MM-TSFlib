@@ -25,11 +25,24 @@ elif (current_dir / "keepa" / "keepa_test.py").exists():
 else:
     sys.path.append(str(current_dir))
 
-try:
-    from analyze_history import parse_price_history, load_history
-except ImportError:
-    print("Error: Cannot import analyze_history. Make sure analyze_history.py is in the same directory.")
-    sys.exit(1)
+# Import analyze_history only when needed for Keepa-related commands
+_analyze_history_imported = False
+
+def _import_analyze_history():
+    """Import analyze_history module when needed for Keepa data processing."""
+    global _analyze_history_imported
+    if not _analyze_history_imported:
+        try:
+            from analyze_history import parse_price_history, load_history
+            _analyze_history_imported = True
+            return parse_price_history, load_history
+        except ImportError:
+            print("Error: Cannot import analyze_history. Make sure analyze_history.py is in the same directory.")
+            sys.exit(1)
+    else:
+        # Return the already imported functions
+        from analyze_history import parse_price_history, load_history
+        return parse_price_history, load_history
 
 # Set up logging - will be configured based on SLURM mode
 logger = logging.getLogger(__name__)
@@ -160,14 +173,13 @@ class AmazonKeepaDataPipeline:
             self.keepa_dir = work_dir  # Default to current directory
             
         self.data_dir = self.keepa_dir / "data"
-        self.output_dir = work_dir / "combined_dataset"
         self.huggingface_dir = work_dir / "huggingface_data"
         self.processed_datasets_dir = work_dir / "processed_datasets"
         
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # Create directories as needed
         self.huggingface_dir.mkdir(parents=True, exist_ok=True)
         self.processed_datasets_dir.mkdir(parents=True, exist_ok=True)
+        # Note: data_dir is only created when actually needed for Keepa operations
     
 
     
@@ -355,6 +367,9 @@ class AmazonKeepaDataPipeline:
         if column_renames:
             reviews_df = reviews_df.rename(columns=column_renames)
         
+        # Create a count column to track actual reviews (1 per review, will be 0 for upsampled empty windows)
+        reviews_df['count'] = 1
+        
         # Create individual review text in specified format before aggregation
         if all(col in reviews_df.columns for col in ['review_title', 'rating', 'helpful_vote', 'text', 'verified_purchase']):
             reviews_df['formatted_review_text'] = (
@@ -399,27 +414,35 @@ class AmazonKeepaDataPipeline:
         
         if windowing_strategy == "calendar":
             if upsample:
-                # For upsampling, we need to create a full time range and join
+                # For upsampling, create individual time ranges per ASIN to maintain continuity
                 logger.info(f"Creating upsampled time series with {calendar_window_interval} windows")
-                # Get the full date range for all ASINs
-                min_date = reviews_df['datetime'].min()
-                max_date = reviews_df['datetime'].max()
                 
-                # Create full time range
-                time_range = pd.date_range(start=min_date, end=max_date, freq=pandas_freq)
+                # Add window_start to original data first
+                reviews_df['window_start'] = reviews_df['datetime'].dt.floor(pandas_freq)
                 
-                # Create skeleton DataFrame with all ASINs and time periods
+                # Create skeleton DataFrame per ASIN based on each ASIN's date range
                 skeleton_data = []
                 for asin in reviews_df['parent_asin'].unique():
-                    for timestamp in time_range:
-                        skeleton_data.append({
-                            'parent_asin': asin,
-                            'window_start': timestamp
-                        })
-                skeleton_df = pd.DataFrame(skeleton_data)
+                    asin_data = reviews_df[reviews_df['parent_asin'] == asin]
+                    if not asin_data.empty:
+                        # Get date range for this specific ASIN
+                        asin_min_date = asin_data['datetime'].min()
+                        asin_max_date = asin_data['datetime'].max()
+                        
+                        # Create full time range for this ASIN
+                        asin_time_range = pd.date_range(start=asin_min_date, end=asin_max_date, freq=pandas_freq)
+                        
+                        # Floor the time range to match window_start precision
+                        asin_time_range = pd.to_datetime(asin_time_range).floor(pandas_freq)
+                        
+                        # Add all time periods for this ASIN
+                        for timestamp in asin_time_range:
+                            skeleton_data.append({
+                                'parent_asin': asin,
+                                'window_start': timestamp
+                            })
                 
-                # Add window_start to original data
-                reviews_df['window_start'] = reviews_df['datetime'].dt.floor(pandas_freq)
+                skeleton_df = pd.DataFrame(skeleton_data)
                 
                 # Join skeleton with original data to create full time series
                 reviews_df = skeleton_df.merge(
@@ -428,7 +451,45 @@ class AmazonKeepaDataPipeline:
                     how='left'
                 )
                 
-                logger.info(f"Upsampling created {len(reviews_df)} records (including empty windows)")
+                # Null-filling strategy for upsampled data:
+                # 1. Product metadata: Forward-fill within each ASIN (these are constant properties)
+                # 2. Count columns: Fill with 0 (empty windows have 0 counts)
+                # 3. Rating/review content: Keep as null (empty windows have no ratings/reviews)
+                # 4. User-specific data: Keep as null (empty windows have no user interactions)
+                # This ensures rolling statistics work correctly while preserving data integrity
+                
+                # Fill nulls with appropriate strategies for different column types
+                # Product metadata should be forward-filled (constant for each ASIN)
+                metadata_columns = ["product_name", "main_category", "categories", "brand", "store", 
+                                  "price", "description", "features", "average_rating", "product_images", "product_videos"]
+                for col in metadata_columns:
+                    if col in reviews_df.columns:
+                        reviews_df[col] = reviews_df.groupby('parent_asin')[col].fillna(method='ffill')
+                
+                # Count-based columns should be filled with 0 for empty windows
+                # The 'count' column tracks actual reviews (1 per review) and becomes 0 for upsampled empty windows
+                count_columns = ["helpful_vote", "count"]
+                for col in count_columns:
+                    if col in reviews_df.columns:
+                        reviews_df[col] = reviews_df[col].fillna(0)
+                
+                # Columns that should remain null for empty windows (no explicit action needed):
+                # - rating: Should be null when no reviews exist
+                # - text: Should be null when no reviews exist  
+                # - review_title: Should be null when no reviews exist
+                # - formatted_review_text: Should be null when no reviews exist
+                # - verified_purchase: Should be null when no reviews exist
+                # - review_images: Should be null when no reviews exist
+                # - user_id: Should be null when no reviews exist
+                # - Any other review-specific fields: Should remain null
+                
+                # Count original vs upsampled records for logging
+                windows_with_reviews = reviews_df['datetime'].notna().sum()
+                empty_windows = len(reviews_df) - windows_with_reviews
+                total_actual_reviews = reviews_df['count'].sum()  # This correctly counts actual reviews
+                logger.info(f"Upsampling created {len(reviews_df)} total records:")
+                logger.info(f"  - {windows_with_reviews} windows with reviews ({total_actual_reviews} total reviews)")
+                logger.info(f"  - {empty_windows} empty windows for continuity")
                 group_cols = ['parent_asin', 'window_start']
             else:
                 # Only process existing data buckets (no upsampling)
@@ -445,7 +506,7 @@ class AmazonKeepaDataPipeline:
         # Define aggregations
         agg_dict = {
             'rating': 'mean',
-            'parent_asin': 'count',  # This will count reviews per window
+            'count': 'sum',  # Sum the count column to get actual review count (handles upsampling correctly)
         }
         
         # Add weighted averages for helpful_vote and verified_purchase
@@ -486,10 +547,16 @@ class AmazonKeepaDataPipeline:
         aggregated['helpful_vote_weighted_avg_rating'] = grouped.apply(helpful_vote_weighted_avg)
         aggregated['verified_purchase_weighted_avg_rating'] = grouped.apply(verified_purchase_weighted_avg)
         
+        # For upsampled data, ensure empty windows have correct values
+        if upsample:
+            # Fill NaN review counts with 0 (empty windows should have 0 reviews, not NaN)
+            aggregated['review_count_window'] = aggregated['review_count_window'].fillna(0)
+            # avg_rating_window should remain NaN for empty windows (correct behavior)
+        
         # Rename columns
         aggregated = aggregated.rename(columns={
             'rating': 'avg_rating_window',
-            'parent_asin': 'review_count_window',
+            'count': 'review_count_window',
             'formatted_review_text': 'aggregated_reviews'
         })
         
@@ -570,7 +637,8 @@ class AmazonKeepaDataPipeline:
         # Keep only the columns we want
         available_columns = [col for col in columns_to_keep if col in aggregated.columns]
         aggregated = aggregated[available_columns]
-        logger.info(f"Generated {len(aggregated)} records from {len(valid_asins)} ASINs (pandas)")
+        logger.info(f"Generated {len(aggregated)} records from {len(valid_asins)} ASINs")
+        logger.info(f"Total actual reviews aggregated: {aggregated['review_count_window'].sum()}")
         return aggregated
     
     def process_huggingface_only_polars(self, category: str, 
@@ -657,6 +725,11 @@ class AmazonKeepaDataPipeline:
         if column_renames:
             reviews_pl = reviews_pl.rename(column_renames)
         
+        # Create a count column to track actual reviews (1 per review, will be 0 for upsampled empty windows)
+        reviews_pl = reviews_pl.with_columns([
+            pl.lit(1).alias('count')
+        ])
+        
         # Create individual review text in specified format before aggregation
         review_text_cols = []
         for col in ['review_title', 'rating', 'helpful_vote', 'text', 'verified_purchase']:
@@ -680,45 +753,72 @@ class AmazonKeepaDataPipeline:
                     pl.lit(r" <\ end review \> ")
                 ]).alias('formatted_review_text')
             ])
-        
         # Create window labels based on strategy
         if windowing_strategy == "calendar":
             if upsample:
-                # For upsampling, we need to create a full time range and join
-                # Get the full date range for all ASINs
-                min_date = reviews_pl.select(pl.col('datetime').min()).item()
-                max_date = reviews_pl.select(pl.col('datetime').max()).item()
+                # For upsampling, create individual time ranges per ASIN to maintain continuity
+                logger.info(f"Creating upsampled time series per ASIN with {calendar_window_interval} windows")
                 
-                # Create full time range
-                time_range = pl.datetime_range(
-                    start=min_date,
-                    end=max_date,
-                    interval=calendar_window_interval
-                )
+                # First truncate the datetime column to the calendar_window_interval
+                reviews_pl = reviews_pl.with_columns([
+                    pl.col('datetime').dt.truncate(calendar_window_interval).alias('window_start')
+                ])
                 
-                # Create skeleton DataFrame with all ASINs and time periods
-                skeleton = pl.DataFrame({
-                    'window_start': time_range
-                }).join(
-                    reviews_pl.select('parent_asin').unique(),
-                    how='cross'
-                )
+                # Sort by ASIN and datetime for proper upsampling
+                reviews_pl = reviews_pl.sort(["parent_asin", "datetime"])
                 
-                # Join with original data
-                reviews_pl = skeleton.join(
-                    reviews_pl.with_columns([
-                        pl.col('datetime').dt.truncate(calendar_window_interval).alias('window_start')
-                    ]),
-                    on=['parent_asin', 'window_start'],
-                    how='left'
+                # Use Polars' upsample method to create empty time buckets per ASIN
+                # This creates empty windows for missing time periods within each ASIN's date range
+                reviews_pl = reviews_pl.upsample(
+                    time_column="window_start",
+                    every=calendar_window_interval,
+                    group_by="parent_asin",
+                    maintain_order=True
                 )
+                # Null-filling strategy for upsampled data:
+                # 1. Product metadata: Forward-fill within each ASIN (these are constant properties)
+                # 2. Count columns: Fill with 0 (empty windows have 0 counts)
+                # 3. Rating/review content: Keep as null (empty windows have no ratings/reviews)
+                # 4. User-specific data: Keep as null (empty windows have no user interactions)
+                # This ensures rolling statistics work correctly while preserving data integrity
+                
+                # Fill nulls with appropriate strategies for different column types
+                fill_expressions = []
+                
+                # Product metadata should be forward-filled (constant for each ASIN)
+                metadata_columns = ["product_name", "main_category", "categories", "brand", "store", "asin", "parent_asin",
+                                  "price", "description", "features", "average_rating", "product_images", "product_videos"]
+                for col in metadata_columns:
+                    if col in reviews_pl.columns:
+                        fill_expressions.append(pl.col(col).fill_null(strategy="forward"))
+                
+                # Count-based columns should be filled with 0 for empty windows
+                # The 'count' column tracks actual reviews (1 per review) and becomes 0 for upsampled empty windows
+                count_columns = ["helpful_vote", "count"]
+                for col in count_columns:
+                    if col in reviews_pl.columns:
+                        fill_expressions.append(pl.col(col).fill_null(0))
+                
+                # Apply the fill strategies
+                if fill_expressions:
+                    reviews_pl = reviews_pl.with_columns(fill_expressions)
+                
+                # Columns that should remain null for empty windows (no explicit action needed):
+                # - rating: Should be null when no reviews exist
+                # - text: Should be null when no reviews exist  
+                # - review_title: Should be null when no reviews exist
+                # - formatted_review_text: Should be null when no reviews exist
+                # - verified_purchase: Should be null when no reviews exist
+                # - review_images: Should be null when no reviews exist
+                # - user_id: Should be null when no reviews exist
+                # - Any other review-specific fields: Should remain null
+                group_cols = ["parent_asin", "window_start"]
             else:
                 # Only process existing data buckets (no upsampling)
                 reviews_pl = reviews_pl.with_columns([
                     pl.col('datetime').dt.truncate(calendar_window_interval).alias('window_start')
                 ])
-            
-            group_cols = ['parent_asin', 'window_start']
+                group_cols = ['parent_asin', 'window_start']
         elif windowing_strategy == "review_frequency":
             # Create review frequency windows
             reviews_pl = reviews_pl.sort(['parent_asin', 'datetime'])
@@ -735,12 +835,12 @@ class AmazonKeepaDataPipeline:
         # Define aggregations
         agg_exprs = [
             pl.col('rating').mean().alias('avg_rating_window'),
-            pl.col('parent_asin').len().alias('review_count_window'),
+            pl.col('count').sum().alias('review_count_window'),  # Sum the count column to get actual review count (handles upsampling correctly)
         ]
         
         # Add weighted averages for helpful_vote and verified_purchase
         if 'helpful_vote' in reviews_pl.columns and 'rating' in reviews_pl.columns:
-            # Helpful vote weighted average rating (only considering reviews with helpful votes > 0)
+            # Helpful vote weighted average rating (weighted by number of helpful votes)
             agg_exprs.append(
                 pl.when(pl.col('helpful_vote').sum() > 0)
                 .then((pl.col('helpful_vote') * pl.col('rating')).sum() / pl.col('helpful_vote').sum())
@@ -826,18 +926,38 @@ class AmazonKeepaDataPipeline:
         # Perform groupby aggregation
         aggregated = reviews_pl.group_by(group_cols).agg(agg_exprs)
         
+        # For upsampled data, ensure empty windows have correct values
+        if upsample:
+            # Fill null review counts with 0 (empty windows should have 0 reviews, not null)
+            aggregated = aggregated.with_columns([
+                pl.col('review_count_window').fill_null(0)
+            ])
+        
         # Add ASIN column (rename parent_asin to asin for consistency)
         aggregated = aggregated.with_columns([
             pl.col('parent_asin').alias('asin')
         ])
         
         # Create the final combined text column in the specified format
-
+        
         # Convert any list[str] columns to string by joining with ', ' before concatenation
+        # Helper function to convert list[null] to list[str] and join, handling empty lists and nulls
+        def list_to_str(col_name):
+            return (
+                pl.when(pl.col(col_name).is_not_null())
+                .then(
+                    pl.col(col_name)
+                    .list.eval(pl.element().cast(str).fill_null(''))
+                    .list.join(', ')
+                )
+                .otherwise(pl.lit(''))
+                .alias(f"{col_name}_str")
+            )
+
         aggregated = aggregated.with_columns([
-            pl.col('categories').list.join(', ').alias('categories_str'),
-            pl.col('features').list.join(', ').alias('features_str'),
-            pl.col('description').list.join(', ').alias('description_str'),
+            list_to_str('categories'),
+            list_to_str('features'),
+            list_to_str('description'),
         ])
 
         # Now build the combined_text using the stringified columns
@@ -909,7 +1029,8 @@ class AmazonKeepaDataPipeline:
         # Keep only the columns we want
         available_columns = [col for col in columns_to_keep if col in result_df.columns]
         result_df = result_df[available_columns]
-        logger.info(f"Generated {len(result_df)} records from {len(valid_asins)} ASINs (Polars)")
+        logger.info(f"Generated {len(result_df)} records from {len(valid_asins)} ASINs")
+        logger.info(f"Total actual reviews aggregated: {result_df['review_count_window'].sum()}")
         return result_df
     
     def _process_calendar_windows_huggingface_only(self, asin: str, asin_reviews: pd.DataFrame,
@@ -1185,6 +1306,8 @@ class AmazonKeepaDataPipeline:
         reviews_df, metadata_df = self.load_local_huggingface_data(category)
         
         # Load Keepa data from local storage
+        # Ensure data_dir exists for Keepa operations
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         json_files = list(self.data_dir.glob("*_complete.json"))
         if not json_files:
             raise RuntimeError("No Keepa data files found. Run keepa.py download first.")
@@ -1212,6 +1335,7 @@ class AmazonKeepaDataPipeline:
                         keepa_data = json.load(f)
                     
                     # Parse price history
+                    parse_price_history, _ = _import_analyze_history()
                     price_df = parse_price_history({"products": [keepa_data]})
                     
                     if price_df.empty:
@@ -1509,37 +1633,46 @@ class AmazonKeepaDataPipeline:
             windows = [7, 30, 90]  # 1 week, 1 month, 3 months
             
             for window_days in windows:
-                # Calculate rolling averages for ratings
+                # Calculate rolling averages for ratings (skip empty windows in the average)
                 asin_data[f'rolling_avg_rating_{window_days}d'] = asin_data['avg_rating_window'].rolling(
                     window=window_days, min_periods=1
                 ).mean()
                 
-                # Calculate rolling review counts (total reviews over rolling window)
+                # Calculate rolling review counts (include 0s from empty windows)
                 if 'review_count_window' in asin_data.columns:
-                    asin_data[f'rolling_review_count_{window_days}d'] = asin_data['review_count_window'].rolling(
+                    # Fill NaN values with 0 for review counts in upsampled data
+                    review_counts = asin_data['review_count_window'].fillna(0)
+                    asin_data[f'rolling_review_count_{window_days}d'] = review_counts.rolling(
                         window=window_days, min_periods=1
                     ).sum()
                     
                     # Calculate rolling average reviews per day (total reviews / window days)
                     asin_data[f'rolling_avg_reviews_per_day_{window_days}d'] = (
-                        asin_data['review_count_window'].rolling(window=window_days, min_periods=1).sum() / window_days
+                        review_counts.rolling(window=window_days, min_periods=1).sum() / window_days
                     )
                 
                 # Calculate rolling helpful votes (only if column exists)
                 if 'helpful_votes_sum' in asin_data.columns:
-                    asin_data[f'rolling_helpful_votes_{window_days}d'] = asin_data['helpful_votes_sum'].rolling(
+                    helpful_votes = asin_data['helpful_votes_sum'].fillna(0)
+                    asin_data[f'rolling_helpful_votes_{window_days}d'] = helpful_votes.rolling(
                         window=window_days, min_periods=1
                     ).sum()
                 
                 # Calculate rolling verified purchase ratio (only if column exists)
                 if 'verified_purchases_ratio' in asin_data.columns:
                     # This is a weighted average based on review counts
+                    review_counts = asin_data['review_count_window'].fillna(0)
+                    verified_ratio = asin_data['verified_purchases_ratio'].fillna(0)
+                    
+                    numerator = (verified_ratio * review_counts).rolling(
+                        window=window_days, min_periods=1
+                    ).sum()
+                    denominator = review_counts.rolling(
+                        window=window_days, min_periods=1
+                    ).sum()
+                    
                     asin_data[f'rolling_verified_ratio_{window_days}d'] = (
-                        (asin_data['verified_purchases_ratio'] * asin_data['review_count_window']).rolling(
-                            window=window_days, min_periods=1
-                        ).sum() / asin_data['review_count_window'].rolling(
-                            window=window_days, min_periods=1
-                        ).sum()
+                        numerator / denominator
                     ).fillna(0)
             
             rolling_stats.append(asin_data)
@@ -1567,19 +1700,20 @@ class AmazonKeepaDataPipeline:
             windows = [7, 30, 90]  # 1 week, 1 month, 3 months
             
             for window_days in windows:
-                # Calculate rolling averages for ratings
+                # Calculate rolling averages for ratings (skip empty windows in the average)
                 asin_data[f'rolling_avg_rating_{window_days}d'] = asin_data['avg_rating_window'].rolling(
                     window=window_days, min_periods=1
                 ).mean()
                 
-                # Calculate rolling review counts (total reviews over rolling window)
-                asin_data[f'rolling_review_count_{window_days}d'] = asin_data['review_count_window'].rolling(
+                # Calculate rolling review counts (include 0s from empty windows)
+                review_counts = asin_data['review_count_window'].fillna(0)
+                asin_data[f'rolling_review_count_{window_days}d'] = review_counts.rolling(
                     window=window_days, min_periods=1
                 ).sum()
                 
                 # Calculate rolling average reviews per day (total reviews / window days)
                 asin_data[f'rolling_avg_reviews_per_day_{window_days}d'] = (
-                    asin_data['review_count_window'].rolling(window=window_days, min_periods=1).sum() / window_days
+                    review_counts.rolling(window=window_days, min_periods=1).sum() / window_days
                 )
                 
                 # Calculate rolling weighted averages for helpful votes and verified purchases
@@ -1602,7 +1736,7 @@ class AmazonKeepaDataPipeline:
         return result_df
     
     def save_organized_data(self, df: pd.DataFrame, category: str, 
-                           config_metadata: Optional[Dict] = None) -> Dict[str, Path]:
+                           config_metadata: Optional[Dict] = None, sub_dir: Optional[str] = None) -> Dict[str, Path]:
         """
         Save organized dataset in multiple formats with configuration metadata.
         
@@ -1610,6 +1744,7 @@ class AmazonKeepaDataPipeline:
             df: DataFrame to save
             category: Product category
             config_metadata: Optional configuration parameters used to create the dataset
+            sub_dir: Optional subdirectory for organizing different configurations
         """
         logger.info("Saving organized dataset")
         
@@ -1621,13 +1756,23 @@ class AmazonKeepaDataPipeline:
         if config_metadata and config_metadata.get('data_source') == 'huggingface_only':
             # Use new directory structure for HuggingFace-only data
             output_dir = self.processed_datasets_dir / "huggingface_only"
+            if sub_dir:
+                output_dir = output_dir / sub_dir
             output_dir.mkdir(parents=True, exist_ok=True)
             base_name = category
         elif config_metadata and config_metadata.get('data_source') == 'keepa_huggingface_combined':
-            output_dir = self.output_dir
+            # Use processed_datasets for combined data as well
+            output_dir = self.processed_datasets_dir / "keepa_huggingface_combined"
+            if sub_dir:
+                output_dir = output_dir / sub_dir
+            output_dir.mkdir(parents=True, exist_ok=True)
             base_name = f"amazon_keepa_{category}_{datetime.now().strftime('%Y%m%d')}"
         else:
-            output_dir = self.output_dir
+            # Default fallback - use processed_datasets
+            output_dir = self.processed_datasets_dir / "default"
+            if sub_dir:
+                output_dir = output_dir / sub_dir
+            output_dir.mkdir(parents=True, exist_ok=True)
             base_name = f"amazon_keepa_{category}_{datetime.now().strftime('%Y%m%d')}"
         
         output_paths = {}
@@ -1863,15 +2008,17 @@ class AmazonKeepaDataPipeline:
         for asin in df['asin'].unique():
             asin_mask = df['asin'] == asin
             for w in window_sizes:
-                # Basic rolling statistics
+                # Basic rolling statistics (skip empty windows in the average)
                 df.loc[asin_mask, f'rolling_avg_rating_{w}w'] = (
                     df.loc[asin_mask, 'avg_rating_window'].rolling(window=w, min_periods=1).mean()
                 )
                 
-                # Rolling review count (total reviews over w windows)
+                # Rolling review count (include 0s from empty windows)
                 if 'review_count_window' in df.columns:
+                    # Fill NaN values with 0 for review counts in upsampled data
+                    review_counts = df.loc[asin_mask, 'review_count_window'].fillna(0)
                     df.loc[asin_mask, f'rolling_review_count_{w}w'] = (
-                        df.loc[asin_mask, 'review_count_window'].rolling(window=w, min_periods=1).sum()
+                        review_counts.rolling(window=w, min_periods=1).sum()
                     )
                 
                 # Add rolling statistics for weighted averages if they exist
@@ -1886,19 +2033,22 @@ class AmazonKeepaDataPipeline:
                     )
         return df
 
-    def load_dataset_with_metadata(self, category: str, work_dir: Path = Path(".")) -> tuple[pd.DataFrame, pd.DataFrame]:
+    def load_dataset_with_metadata(self, category: str, work_dir: Path = Path("."), sub_dir: Optional[str] = None) -> tuple[pd.DataFrame, pd.DataFrame]:
         """
         Load a processed HuggingFace-only dataset along with its metadata file.
         
         Args:
             category: Product category
             work_dir: Working directory
+            sub_dir: Optional subdirectory where the dataset is stored
             
         Returns:
             Tuple of (main_dataset, metadata_dataset)
         """
         # Determine file paths
         processed_dir = work_dir / "processed_datasets" / "huggingface_only"
+        if sub_dir:
+            processed_dir = processed_dir / sub_dir
         main_file = processed_dir / f"{category}.parquet"
         metadata_file = processed_dir / f"{category}_metadata.parquet"
         
@@ -1986,6 +2136,8 @@ def merge_datasets(
         )
         pipeline = AmazonKeepaDataPipeline(work_dir)
         try:
+            # Ensure data_dir exists for Keepa operations
+            pipeline.data_dir.mkdir(parents=True, exist_ok=True)
             keepa_files = list(pipeline.data_dir.glob("*_complete.json"))
             if not keepa_files:
                 out.print("[bold red]No Keepa data found! Run keepa.py download first.[/bold red]")
@@ -2139,11 +2291,12 @@ def process_huggingface_only(
     min_reviews_per_asin: int = typer.Option(10, help="Minimum reviews required per ASIN"),
     max_asins: Optional[int] = typer.Option(None, help="Maximum ASINs to process (None = all ASINs)"),
     work_dir: Path = typer.Option(".", help="Working directory"),
+    sub_dir: Optional[str] = typer.Option(None, help="Subdirectory name for organizing different configurations"),
     pull_huggingface: bool = typer.Option(False, help="Pull HuggingFace data from cloud instead of using local"),
     debug: bool = typer.Option(False, "--debug", help="Enable debug mode with full tracebacks and stop on first error"),
     use_polars: bool = typer.Option(False, "--polars", help="Use Polars for faster processing (requires polars package)"),
     rolling_window_sizes: list[int] = typer.Option([3, 5, 10, 30], help="Rolling window sizes for additional statistics"),
-    upsample: bool = typer.Option(False, "--upsample", help="Create empty buckets for missing time periods (increases row count)")
+    upsample: bool = typer.Option(False, "--upsample", help="Create empty buckets for missing time periods to maintain continuity for rolling statistics. Empty windows have review_count=0 (not counted as reviews). Example: if an ASIN has reviews in months 1-3 and 6-12, this creates empty observations for months 4-5.")
 ):
     """Process HuggingFace review data without Keepa price data."""
     valid_strategies = ["calendar", "review_frequency"]
@@ -2156,13 +2309,15 @@ def process_huggingface_only(
             strategy_desc = f"Calendar windows ({calendar_window_interval} intervals)"
         else:
             strategy_desc = f"Review frequency windows (every {review_window_size} reviews)"
+        sub_dir_display = f"Subdirectory: {sub_dir}" if sub_dir else "Subdirectory: None (default location)"
         out.panel(
             f"[bold blue]Processing HuggingFace Data Only[/bold blue]\n"
             f"Category: {category}\n"
             f"Strategy: {strategy_desc}\n"
             f"Include All Reviews: {include_all_reviews}\n"
             f"Min Reviews per ASIN: {min_reviews_per_asin}\n"
-            f"Max ASINs: {max_asins if max_asins is not None else 'All'}",
+            f"Max ASINs: {max_asins if max_asins is not None else 'All'}\n"
+            f"{sub_dir_display}",
             border_style="blue"
         )
         pipeline = AmazonKeepaDataPipeline(work_dir)
@@ -2199,7 +2354,7 @@ def process_huggingface_only(
                 'upsample': upsample
             }
             try:
-                output_paths = pipeline.save_organized_data(combined_df, category, config_metadata)
+                output_paths = pipeline.save_organized_data(combined_df, category, config_metadata, sub_dir)
                 out.print("\n[bold green]Processing completed![/bold green]")
                 out.print("Output files:")
                 for file_type, path in output_paths.items():
@@ -2212,6 +2367,14 @@ def process_huggingface_only(
                 if 'metadata' in output_paths:
                     out.print(f"\n[bold yellow]Note:[/bold yellow] Product metadata has been saved to a separate file to reduce dataset size.")
                     out.print(f"  Use the metadata file to join product information (title, category, brand, etc.) when needed.")
+                
+                # Show how to load this dataset
+                sub_dir_param = f" --sub-dir {sub_dir}" if sub_dir else ""
+                out.print(f"\n[bold]To load this dataset:[/bold]")
+                out.print(f"  pipeline = AmazonKeepaDataPipeline()")
+                out.print(f"  df, metadata = pipeline.load_dataset_with_metadata('{category}', sub_dir='{sub_dir or 'None'}')")
+                out.print(f"\n[bold]To list all configurations:[/bold]")
+                out.print(f"  python dataset_builder.py list-configurations")
             except Exception as e:
                 if debug:
                     out.print(f"[bold red]Error saving data: {e}[/bold red]")
@@ -2230,6 +2393,86 @@ def process_huggingface_only(
             else:
                 out.print(f"[bold red]Processing failed: {e}[/bold red]")
                 raise typer.Exit(1)
+
+@app.command()
+def list_configurations(
+    category: str = typer.Option(None, help="Filter by specific category"),
+    work_dir: Path = typer.Option(".", help="Working directory")
+):
+    """List available processed dataset configurations (subdirectories)."""
+    with SlurmOutput(USE_SLURM) as out:
+        out.panel(
+            "[bold blue]Available Processed Dataset Configurations[/bold blue]",
+            border_style="blue"
+        )
+        pipeline = AmazonKeepaDataPipeline(work_dir)
+        try:
+            processed_dir = pipeline.processed_datasets_dir / "huggingface_only"
+            if not processed_dir.exists():
+                out.print("[yellow]No processed datasets found.[/yellow]")
+                return
+            
+            # Get all subdirectories
+            subdirs = [d for d in processed_dir.iterdir() if d.is_dir()]
+            if not subdirs:
+                out.print("[yellow]No configuration subdirectories found.[/yellow]")
+                return
+            
+            out.print(f"\n[bold green]Found {len(subdirs)} configuration(s):[/bold green]")
+            
+            for subdir in sorted(subdirs):
+                subdir_name = subdir.name
+                out.print(f"\n[bold cyan]{subdir_name}[/bold cyan]")
+                
+                # Look for summary files to get configuration info
+                summary_files = list(subdir.glob("*_summary.json"))
+                if summary_files:
+                    for summary_file in summary_files:
+                        try:
+                            with open(summary_file, 'r') as f:
+                                summary = json.load(f)
+                            
+                            cat_name = summary.get('category', 'Unknown')
+                            if category and cat_name != category:
+                                continue
+                                
+                            out.print(f"  Category: {cat_name}")
+                            out.print(f"  Records: {summary.get('total_records', 0):,}")
+                            out.print(f"  ASINs: {summary.get('unique_asins', 0):,}")
+                            
+                            config = summary.get('processing_config', {})
+                            if config:
+                                out.print(f"  Strategy: {config.get('windowing_strategy', 'Unknown')}")
+                                if config.get('windowing_strategy') == 'calendar':
+                                    out.print(f"  Interval: {config.get('calendar_window_interval', 'Unknown')}")
+                                elif config.get('windowing_strategy') == 'review_frequency':
+                                    out.print(f"  Window Size: {config.get('review_window_size', 'Unknown')}")
+                                out.print(f"  Min Reviews: {config.get('min_reviews_per_asin', 'Unknown')}")
+                                out.print(f"  Upsample: {config.get('upsample', False)}")
+                                out.print(f"  Polars: {'Yes' if config.get('use_polars', False) else 'No'}")
+                            
+                            if summary.get('date_range'):
+                                date_range = summary['date_range']
+                                out.print(f"  Date Range: {date_range['start'][:10]} to {date_range['end'][:10]}")
+                                
+                        except Exception as e:
+                            out.print(f"  [red]Error reading summary: {e}[/red]")
+                else:
+                    # Just list the files in the subdirectory
+                    files = list(subdir.glob("*.parquet"))
+                    if files:
+                        out.print(f"  Files: {len(files)} parquet files")
+                        for file in files:
+                            out.print(f"    {file.name}")
+                    else:
+                        out.print("  [yellow]No parquet files found[/yellow]")
+            
+            out.print(f"\n[bold]Usage:[/bold]")
+            out.print(f"  Load dataset: pipeline.load_dataset_with_metadata('{category or 'CategoryName'}', sub_dir='{subdirs[0].name if subdirs else 'SubDirName'}')")
+            
+        except Exception as e:
+            out.print(f"[bold red]Failed to list configurations: {e}[/bold red]")
+            raise typer.Exit(1)
 
 @app.command()
 def category_info(
