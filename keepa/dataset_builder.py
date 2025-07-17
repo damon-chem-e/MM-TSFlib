@@ -193,9 +193,19 @@ class AmazonKeepaDataPipeline:
         category_dir.mkdir(parents=True, exist_ok=True)
         
         try:
+            # Set custom cache directory to avoid disk quota issues
+            cache_dir = self.work_dir / ".hf_cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+
             # Download reviews data with trust_remote_code=True to fix warning
             logger.info("Downloading reviews dataset...")
-            reviews_dataset = load_dataset("McAuley-Lab/Amazon-Reviews-2023", f"raw_review_{category}", trust_remote_code=True)
+            logger.info(f"Using HuggingFace cache directory: {cache_dir}")
+            reviews_dataset = load_dataset(
+                "McAuley-Lab/Amazon-Reviews-2023",
+                f"raw_review_{category}",
+                trust_remote_code=True,
+                cache_dir=str(cache_dir)
+            )
             reviews_df = reviews_dataset["full"].to_pandas()
             
             if sample_reviews:
@@ -231,7 +241,12 @@ class AmazonKeepaDataPipeline:
             metadata_path = None
             try:
                 logger.info("Downloading metadata dataset...")
-                meta_dataset = load_dataset("McAuley-Lab/Amazon-Reviews-2023", f"raw_meta_{category}", trust_remote_code=True)
+                meta_dataset = load_dataset(
+                    "McAuley-Lab/Amazon-Reviews-2023",
+                    f"raw_meta_{category}",
+                    trust_remote_code=True,
+                    cache_dir=str(cache_dir)
+                )
                 metadata_df = meta_dataset["full"].to_pandas()
                 
                 metadata_path = category_dir / "metadata.parquet"

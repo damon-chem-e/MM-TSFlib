@@ -10,24 +10,5 @@
 source /home/damonp/.bashrc
 source /home/damonp/venvs/amazon-data/bin/activate
 
-# Read all categories from the text file
-while IFS= read -r category; do
-    # Skip empty lines
-    if [[ -z "$category" ]]; then
-        continue
-    fi
-    
-    echo "Downloading data for category: $category"
-    
-    python \
-           /home/damonp/projects/chimera_proj/amazon-data/lib/dataset_builder.py --slurm \
-           download-huggingface \
-           --category "$category" \
-           --work-dir /home/damonp/projects/chimera_proj/amazon-data
-    
-    echo "Completed download for category: $category"
-    echo "----------------------------------------"
-    
-done < all_categories.txt
-
-echo "All category downloads completed!" 
+# Call the orchestrator script with download command and SLURM mode
+python orchestrator.py download 
