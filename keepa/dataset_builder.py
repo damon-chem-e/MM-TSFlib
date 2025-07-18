@@ -2242,7 +2242,7 @@ def list_categories(
 def process_huggingface_only(
     category: str = typer.Option("All_Beauty", help="Amazon product category"),
     windowing_strategy: str = typer.Option("calendar", help="Windowing strategy: calendar or review_frequency"),
-    calendar_window_interval: str = typer.Option("1d", help="Time interval per calendar window (e.g., 1d, 2M, 1w) for calendar strategy"),
+    calendar_window_interval: str = typer.Option("1mo", help="Time interval per calendar window (e.g., 1d, 2M, 1w) for calendar strategy"),
     review_window_size: int = typer.Option(10, help="Reviews per window (for review_frequency strategy)"),
     include_all_reviews: bool = typer.Option(True, help="Include all reviews in time window"),
     min_reviews_per_asin: int = typer.Option(10, help="Minimum reviews required per ASIN"),
@@ -2253,7 +2253,7 @@ def process_huggingface_only(
     debug: bool = typer.Option(False, "--debug", help="Enable debug mode with full tracebacks and stop on first error"),
     rolling_window_sizes: list[int] = typer.Option([3, 5, 10, 30], help="Rolling window sizes for additional statistics"),
     upsample: bool = typer.Option(False, "--upsample", help="Create empty buckets for missing time periods to maintain continuity for rolling statistics. Empty windows have review_count=0 (not counted as reviews). Example: if an ASIN has reviews in months 1-3 and 6-12, this creates empty observations for months 4-5."),
-    asins_per_batch: int = typer.Option(1000, help="Number of ASINs to process in each batch for memory efficiency (default: 1000)"),
+    asins_per_batch: int = typer.Option(100_000, help="Number of ASINs to process in each batch for memory efficiency (default: 100,000)"),
     slurm: bool = typer.Option(False, "--slurm", help="Flush log output for SLURM/plain mode")
 ):
     """

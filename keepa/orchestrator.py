@@ -56,7 +56,7 @@ def category_download(category: str, work_dir: str, use_slurm: bool = False) -> 
         True if successful, False otherwise
     """
     if use_slurm:
-        print(f"Downloading data for category: {category}")
+        print(f"Downloading data for category: {category}", flush=True)
     else:
         console.print(f"[blue]Downloading data for category: {category}[/blue]")
     
@@ -65,29 +65,32 @@ def category_download(category: str, work_dir: str, use_slurm: bool = False) -> 
         cmd = [
             sys.executable,  # Use current Python interpreter
             "/home/damonp/projects/chimera_proj/amazon-data/lib/dataset_builder.py",
-            "--slurm" if use_slurm else "",
             "download-huggingface",
+        ]
+        if use_slurm:
+            cmd.append("--slurm")
+        cmd.extend([
             "--category", category,
             "--work-dir", work_dir
-        ]
+        ])
         
         # Remove empty strings from command
         cmd = [arg for arg in cmd if arg]
         
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, stdout=sys.stdout, stderr=sys.stderr)
         
         if result.returncode == 0:
             if use_slurm:
-                print(f"Completed download for category: {category}")
-                print("----------------------------------------")
+                print(f"Completed download for category: {category}", flush=True)
+                print("----------------------------------------", flush=True)
             else:
                 console.print(f"[green]Completed download for category: {category}[/green]")
             return True
         else:
             if use_slurm:
-                print(f"Error processing category {category}:")
-                print(f"STDOUT: {result.stdout}")
-                print(f"STDERR: {result.stderr}")
+                print(f"Error processing category {category}:", flush=True)
+                print(f"STDOUT: {result.stdout}", flush=True)
+                print(f"STDERR: {result.stderr}", flush=True)
             else:
                 console.print(f"[red]Error processing category {category}:[/red]")
                 console.print(f"STDOUT: {result.stdout}")
@@ -97,7 +100,7 @@ def category_download(category: str, work_dir: str, use_slurm: bool = False) -> 
     except Exception as e:
         error_msg = f"Exception occurred while processing category {category}: {e}"
         if use_slurm:
-            print(error_msg)
+            print(error_msg, flush=True)
         else:
             console.print(f"[red]{error_msg}[/red]")
         return False
@@ -118,7 +121,7 @@ def category_processing(category: str, work_dir: str, use_slurm: bool = False,
         True if successful, False otherwise
     """
     if use_slurm:
-        print(f"Processing data for category: {category}")
+        print(f"Processing data for category: {category}", flush=True)
     else:
         console.print(f"[blue]Processing data for category: {category}[/blue]")
 
@@ -151,20 +154,20 @@ def category_processing(category: str, work_dir: str, use_slurm: bool = False,
         # Remove empty strings from command
         cmd = [arg for arg in cmd if arg]
         
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, stdout=sys.stdout, stderr=sys.stderr)
         
         if result.returncode == 0:
             if use_slurm:
-                print(f"Completed processing for category: {category}")
-                print("----------------------------------------")
+                print(f"Completed processing for category: {category}", flush=True)
+                print("----------------------------------------", flush=True)
             else:
                 console.print(f"[green]Completed processing for category: {category}[/green]")
             return True
         else:
             if use_slurm:
-                print(f"Error processing category {category}:")
-                print(f"STDOUT: {result.stdout}")
-                print(f"STDERR: {result.stderr}")
+                print(f"Error processing category {category}:", flush=True)
+                print(f"STDOUT: {result.stdout}", flush=True)
+                print(f"STDERR: {result.stderr}", flush=True)
             else:
                 console.print(f"[red]Error processing category {category}:[/red]")
                 console.print(f"STDOUT: {result.stdout}")
@@ -174,7 +177,7 @@ def category_processing(category: str, work_dir: str, use_slurm: bool = False,
     except Exception as e:
         error_msg = f"Exception occurred while processing category {category}: {e}"
         if use_slurm:
-            print(error_msg)
+            print(error_msg, flush=True)
         else:
             console.print(f"[red]{error_msg}[/red]")
         return False
@@ -218,6 +221,8 @@ def process_category(
     By default, runs both calendar windowing (1w intervals) and review frequency windowing (10 reviews).
     Loads categories from file and processes the category at the specified index.
     """
+    # Print at the very top to confirm entry
+    print("Starting process_category", flush=True)
     # Load categories from file
     categories = load_categories(categories_file)
     
