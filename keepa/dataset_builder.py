@@ -69,18 +69,9 @@ def setup_logging(use_slurm: bool = False):
 
 app = typer.Typer()
 
-# Add global SLURM option and output context manager
-USE_SLURM = False
-
-# Add global Typer callback for --slurm (must be before any commands)
-@app.callback()
-def main(
-    slurm: bool = typer.Option(False, "--slurm", help="Use SLURM-friendly output (plain, flushed, no rich formatting)")
-):
-    global USE_SLURM
-    USE_SLURM = slurm
-    # Set up logging based on SLURM mode
-    setup_logging(slurm)
+def flush_logger(slurm: bool = False):
+    if slurm:
+        sys.stdout.flush()
 
 class SlurmOutput:
     """
@@ -665,22 +656,22 @@ class AmazonKeepaDataPipeline:
                                        max_asins: Optional[int] = None,
                                        debug: bool = False,
                                        rolling_window_sizes: list[int] = [3, 5, 10, 30],
-                                       upsample: bool = False) -> pd.DataFrame:
+                                       upsample: bool = False,
+                                       asins_per_batch: int = 1000,
+                                       slurm: bool = False) -> pd.DataFrame:
         """
         Polars-based implementation of process_huggingface_only for better performance.
-        
-        This method uses Polars for faster data processing, especially beneficial
-        for large datasets with millions of reviews.
-        
-        Note: Images and videos are ignored for now but could be included later
-        when expanding to vision as another modality.
+        Now processes ASINs in batches for memory efficiency.
+        Args:
+            asins_per_batch: Number of ASINs to process in each batch (default: 1000)
+            slurm: If True, flush logger after each log message for SLURM/plain mode
         """
         try:
             import polars as pl
         except ImportError:
             raise ImportError("Polars is required for this method. Install with: pip install polars")
         
-        logger.info(f"Processing HuggingFace data for {category} using {windowing_strategy} strategy (Polars)")
+        logger.info(f"Processing HuggingFace data for {category} using {windowing_strategy} strategy (Polars, batched)")
         
         # Load data
         reviews_df, metadata_df = self.load_local_huggingface_data(category)
@@ -703,347 +694,293 @@ class AmazonKeepaDataPipeline:
             valid_asins = valid_asins[:max_asins]
             logger.info(f"Limited to first {max_asins} ASINs for debugging/testing")
         
-        # Filter to only the valid ASINs
-        valid_asins_df = valid_asins_df.filter(pl.col('parent_asin').is_in(valid_asins))
-        reviews_pl = reviews_pl.join(valid_asins_df.select('parent_asin'), on='parent_asin', how='inner')
+        logger.info(f"Processing {len(valid_asins)} ASINs with at least {min_reviews_per_asin} reviews in batches of {asins_per_batch}")
         
-        logger.info(f"Processing {len(valid_asins)} ASINs with at least {min_reviews_per_asin} reviews")
-        
-        if reviews_pl.is_empty():
+        if not valid_asins:
             logger.warning("No ASINs meet the minimum review requirement")
             return pd.DataFrame()
         
-        # Merge with metadata - use parent_asin for joining
-        if not metadata_pl.is_empty():
-            # Ensure metadata has the correct column names for joining
-            if 'parent_asin' in metadata_pl.columns:
-                reviews_pl = reviews_pl.join(metadata_pl, on='parent_asin', how='left')
+        # Prepare for batching
+        import sys
+        def flush_logger(slurm: bool = False):
+            if slurm:
+                sys.stdout.flush()
+        all_results = []
+        n_batches = (len(valid_asins) + asins_per_batch - 1) // asins_per_batch
+        for batch_idx in range(n_batches):
+            batch_asins = valid_asins[batch_idx*asins_per_batch : (batch_idx+1)*asins_per_batch]
+            msg = f"Processing batch {batch_idx+1}/{n_batches} ({len(batch_asins)} ASINs)"
+            logger.info(msg)
+            if slurm:
+                print(msg, flush=True)
+            flush_logger(slurm)
+            # Filter reviews and metadata for this batch
+            batch_reviews = reviews_pl.filter(pl.col('parent_asin').is_in(batch_asins))
+            batch_metadata = metadata_pl.filter(pl.col('parent_asin').is_in(batch_asins)) if not metadata_pl.is_empty() else metadata_pl
+            # The rest of the logic is the same as before, but on batch_reviews/batch_metadata
+            # --- Begin original logic, but replace reviews_pl/metadata_pl with batch_reviews/batch_metadata ---
+            reviews_pl_batch = batch_reviews
+            metadata_pl_batch = batch_metadata
+            # Merge with metadata - use parent_asin for joining
+            if not metadata_pl_batch.is_empty():
+                if 'parent_asin' in metadata_pl_batch.columns:
+                    reviews_pl_batch = reviews_pl_batch.join(metadata_pl_batch, on='parent_asin', how='left')
+                else:
+                    logger.warning("Metadata does not have parent_asin column, skipping metadata join")
             else:
-                logger.warning("Metadata does not have parent_asin column, skipping metadata join")
-        else:
-            logger.warning("No metadata available, processing without metadata")
-        
-        # Rename columns as specified by user
-        # title -> review_title, title_right -> product_name
-        column_renames = {}
-        if 'title_right' in reviews_pl.columns:
-            column_renames['title_right'] = 'product_name'
-        if 'images_right' in reviews_pl.columns:
-            column_renames['images_right'] = 'product_images'
-        if 'images' in reviews_pl.columns:
-            column_renames['images'] = 'review_images'
-        if 'videos' in reviews_pl.columns:
-            column_renames['videos'] = 'product_videos'
-        if 'title' in reviews_pl.columns:
-            column_renames['title'] = 'review_title'
-        
-        if column_renames:
-            reviews_pl = reviews_pl.rename(column_renames)
-        
-        # Create a count column to track actual reviews (1 per review, will be 0 for upsampled empty windows)
-        reviews_pl = reviews_pl.with_columns([
-            pl.lit(1).alias('count')
-        ])
-        
-        # Create individual review text in specified format before aggregation
-        review_text_cols = []
-        for col in ['review_title', 'rating', 'helpful_vote', 'text', 'verified_purchase']:
-            if col in reviews_pl.columns:
-                review_text_cols.append(col)
-        
-        if review_text_cols:
-            # Create formatted review text for each review
-            reviews_pl = reviews_pl.with_columns([
-                pl.concat_str([
-                    pl.lit(r"<\ begin review \> title: "),
-                    pl.col('review_title').fill_null(''),
-                    pl.lit(" || rating: "),
-                    pl.col('rating').cast(pl.Utf8),
-                    pl.lit(" || helpful votes: "),
-                    pl.col('helpful_vote').fill_null(0).cast(pl.Utf8),
-                    pl.lit(" || content: "),
-                    pl.col('text').fill_null(''),
-                    pl.lit(" || verified purchase: "),
-                    pl.col('verified_purchase').fill_null(False).cast(pl.Utf8),
-                    pl.lit(r" <\ end review \> ")
-                ]).alias('formatted_review_text')
+                logger.warning("No metadata available, processing without metadata")
+            # Rename columns as specified by user
+            column_renames = {}
+            if 'title_right' in reviews_pl_batch.columns:
+                column_renames['title_right'] = 'product_name'
+            if 'images_right' in reviews_pl_batch.columns:
+                column_renames['images_right'] = 'product_images'
+            if 'images' in reviews_pl_batch.columns:
+                column_renames['images'] = 'review_images'
+            if 'videos' in reviews_pl_batch.columns:
+                column_renames['videos'] = 'product_videos'
+            if 'title' in reviews_pl_batch.columns:
+                column_renames['title'] = 'review_title'
+            if column_renames:
+                reviews_pl_batch = reviews_pl_batch.rename(column_renames)
+            reviews_pl_batch = reviews_pl_batch.with_columns([
+                pl.lit(1).alias('count')
             ])
-        # Create window labels based on strategy
-        if windowing_strategy == "calendar":
+            review_text_cols = []
+            for col in ['review_title', 'rating', 'helpful_vote', 'text', 'verified_purchase']:
+                if col in reviews_pl_batch.columns:
+                    review_text_cols.append(col)
+            if review_text_cols:
+                reviews_pl_batch = reviews_pl_batch.with_columns([
+                    pl.concat_str([
+                        pl.lit(r"<\ begin review \> title: "),
+                        pl.col('review_title').fill_null(''),
+                        pl.lit(" || rating: "),
+                        pl.col('rating').cast(pl.Utf8),
+                        pl.lit(" || helpful votes: "),
+                        pl.col('helpful_vote').fill_null(0).cast(pl.Utf8),
+                        pl.lit(" || content: "),
+                        pl.col('text').fill_null(''),
+                        pl.lit(" || verified purchase: "),
+                        pl.col('verified_purchase').fill_null(False).cast(pl.Utf8),
+                        pl.lit(r" <\ end review \> ")
+                    ]).alias('formatted_review_text')
+                ])
+            if windowing_strategy == "calendar":
+                if upsample:
+                    logger.info(f"Creating upsampled time series per ASIN with {calendar_window_interval} windows (batch {batch_idx+1})")
+                    reviews_pl_batch = reviews_pl_batch.with_columns([
+                        pl.col('datetime').dt.truncate(calendar_window_interval).alias('window_start')
+                    ])
+                    reviews_pl_batch = reviews_pl_batch.sort(["parent_asin", "datetime"])
+                    reviews_pl_batch = reviews_pl_batch.upsample(
+                        time_column="window_start",
+                        every=calendar_window_interval,
+                        group_by="parent_asin",
+                        maintain_order=True
+                    )
+                    fill_expressions = []
+                    metadata_columns = ["product_name", "main_category", "categories", "brand", "store", "asin", "parent_asin",
+                                      "price", "description", "features", "average_rating", "product_images", "product_videos"]
+                    for col in metadata_columns:
+                        if col in reviews_pl_batch.columns:
+                            fill_expressions.append(pl.col(col).fill_null(strategy="forward"))
+                    count_columns = ["helpful_vote", "count"]
+                    for col in count_columns:
+                        if col in reviews_pl_batch.columns:
+                            fill_expressions.append(pl.col(col).fill_null(0))
+                    if fill_expressions:
+                        reviews_pl_batch = reviews_pl_batch.with_columns(fill_expressions)
+                    group_cols = ["parent_asin", "window_start"]
+                    if upsample:
+                        msg = f"Upsampling in batch {batch_idx+1}/{n_batches}"
+                        logger.info(msg)
+                        if slurm:
+                            print(msg, flush=True)
+                        flush_logger(slurm)
+                else:
+                    reviews_pl_batch = reviews_pl_batch.with_columns([
+                        pl.col('datetime').dt.truncate(calendar_window_interval).alias('window_start')
+                    ])
+                    group_cols = ['parent_asin', 'window_start']
+            elif windowing_strategy == "review_frequency":
+                reviews_pl_batch = reviews_pl_batch.sort(['parent_asin', 'datetime'])
+                reviews_pl_batch = reviews_pl_batch.with_columns([
+                    pl.int_range(pl.len()).over('parent_asin').alias('row_nr')
+                ])
+                reviews_pl_batch = reviews_pl_batch.with_columns([
+                    (pl.col('row_nr') // review_window_size).alias('window_id')
+                ])
+                group_cols = ['parent_asin', 'window_id']
+            else:
+                raise ValueError(f"Unsupported windowing strategy: {windowing_strategy}")
+            agg_exprs = [
+                pl.col('rating').mean().alias('avg_rating_window'),
+                pl.col('count').sum().alias('review_count_window'),
+            ]
+            if 'helpful_vote' in reviews_pl_batch.columns and 'rating' in reviews_pl_batch.columns:
+                agg_exprs.append(
+                    pl.when(pl.col('helpful_vote').sum() > 0)
+                    .then((pl.col('helpful_vote') * pl.col('rating')).sum() / pl.col('helpful_vote').sum())
+                    .otherwise(None)
+                    .alias('helpful_vote_weighted_avg_rating')
+                )
+            else:
+                agg_exprs.append(pl.lit(None).alias('helpful_vote_weighted_avg_rating'))
+            if 'verified_purchase' in reviews_pl_batch.columns and 'rating' in reviews_pl_batch.columns:
+                agg_exprs.append(
+                    pl.when(pl.col('verified_purchase').sum() > 0)
+                    .then((pl.col('verified_purchase').cast(pl.Float64) * pl.col('rating')).sum() / pl.col('verified_purchase').sum())
+                    .otherwise(None)
+                    .alias('verified_purchase_weighted_avg_rating')
+                )
+            else:
+                agg_exprs.append(pl.lit(None).alias('verified_purchase_weighted_avg_rating'))
+            if 'product_name' in reviews_pl_batch.columns:
+                agg_exprs.append(pl.col('product_name').first().alias('product_name'))
+            else:
+                agg_exprs.append(pl.lit('').alias('product_name'))
+            if 'main_category' in reviews_pl_batch.columns:
+                agg_exprs.append(pl.col('main_category').first().alias('main_category'))
+            else:
+                agg_exprs.append(pl.lit(category).alias('main_category'))
+            if 'categories' in reviews_pl_batch.columns:
+                agg_exprs.append(pl.col('categories').first().alias('categories'))
+            else:
+                agg_exprs.append(pl.lit('').alias('categories'))
+            if 'brand' in reviews_pl_batch.columns:
+                agg_exprs.append(pl.col('brand').first().alias('brand'))
+            else:
+                agg_exprs.append(pl.lit('').alias('brand'))
+            if 'store' in reviews_pl_batch.columns:
+                agg_exprs.append(pl.col('store').first().alias('store'))
+            else:
+                agg_exprs.append(pl.lit('').alias('store'))
+            if 'price' in reviews_pl_batch.columns:
+                agg_exprs.append(pl.col('price').first().alias('price'))
+            else:
+                agg_exprs.append(pl.lit('').alias('price'))
+            if 'description' in reviews_pl_batch.columns:
+                agg_exprs.append(pl.col('description').first().alias('description'))
+            else:
+                agg_exprs.append(pl.lit('').alias('description'))
+            if 'features' in reviews_pl_batch.columns:
+                agg_exprs.append(pl.col('features').first().alias('features'))
+            else:
+                agg_exprs.append(pl.lit('').alias('features'))
+            if 'average_rating' in reviews_pl_batch.columns:
+                agg_exprs.append(pl.col('average_rating').first().alias('avg_rating_metadata'))
+            else:
+                agg_exprs.append(pl.lit(None).alias('avg_rating_metadata'))
+            if 'formatted_review_text' in reviews_pl_batch.columns:
+                agg_exprs.append(
+                    pl.col('formatted_review_text').drop_nulls().str.join('').alias('aggregated_reviews')
+                )
+            else:
+                agg_exprs.append(pl.lit('').alias('aggregated_reviews'))
+            if windowing_strategy == "calendar":
+                agg_exprs.append(pl.col('window_start').first().alias('timestamp'))
+            else:
+                agg_exprs.append(pl.col('datetime').first().alias('timestamp'))
+            aggregated = reviews_pl_batch.group_by(group_cols).agg(agg_exprs)
             if upsample:
-                # For upsampling, create individual time ranges per ASIN to maintain continuity
-                logger.info(f"Creating upsampled time series per ASIN with {calendar_window_interval} windows")
-                
-                # First truncate the datetime column to the calendar_window_interval
-                reviews_pl = reviews_pl.with_columns([
-                    pl.col('datetime').dt.truncate(calendar_window_interval).alias('window_start')
+                aggregated = aggregated.with_columns([
+                    pl.col('review_count_window').fill_null(0)
                 ])
-                
-                # Sort by ASIN and datetime for proper upsampling
-                reviews_pl = reviews_pl.sort(["parent_asin", "datetime"])
-                
-                # Use Polars' upsample method to create empty time buckets per ASIN
-                # This creates empty windows for missing time periods within each ASIN's date range
-                reviews_pl = reviews_pl.upsample(
-                    time_column="window_start",
-                    every=calendar_window_interval,
-                    group_by="parent_asin",
-                    maintain_order=True
+            aggregated = aggregated.with_columns([
+                pl.col('parent_asin').alias('asin')
+            ])
+            def list_to_str(col_name):
+                return (
+                    pl.when(pl.col(col_name).is_not_null())
+                    .then(
+                        pl.col(col_name)
+                        .list.eval(pl.element().cast(str).fill_null(''))
+                        .list.join(', ')
+                    )
+                    .otherwise(pl.lit(''))
+                    .alias(f"{col_name}_str")
                 )
-                # Null-filling strategy for upsampled data:
-                # 1. Product metadata: Forward-fill within each ASIN (these are constant properties)
-                # 2. Count columns: Fill with 0 (empty windows have 0 counts)
-                # 3. Rating/review content: Keep as null (empty windows have no ratings/reviews)
-                # 4. User-specific data: Keep as null (empty windows have no user interactions)
-                # This ensures rolling statistics work correctly while preserving data integrity
-                
-                # Fill nulls with appropriate strategies for different column types
-                fill_expressions = []
-                
-                # Product metadata should be forward-filled (constant for each ASIN)
-                metadata_columns = ["product_name", "main_category", "categories", "brand", "store", "asin", "parent_asin",
-                                  "price", "description", "features", "average_rating", "product_images", "product_videos"]
-                for col in metadata_columns:
-                    if col in reviews_pl.columns:
-                        fill_expressions.append(pl.col(col).fill_null(strategy="forward"))
-                
-                # Count-based columns should be filled with 0 for empty windows
-                # The 'count' column tracks actual reviews (1 per review) and becomes 0 for upsampled empty windows
-                count_columns = ["helpful_vote", "count"]
-                for col in count_columns:
-                    if col in reviews_pl.columns:
-                        fill_expressions.append(pl.col(col).fill_null(0))
-                
-                # Apply the fill strategies
-                if fill_expressions:
-                    reviews_pl = reviews_pl.with_columns(fill_expressions)
-                
-                # Columns that should remain null for empty windows (no explicit action needed):
-                # - rating: Should be null when no reviews exist
-                # - text: Should be null when no reviews exist  
-                # - review_title: Should be null when no reviews exist
-                # - formatted_review_text: Should be null when no reviews exist
-                # - verified_purchase: Should be null when no reviews exist
-                # - review_images: Should be null when no reviews exist
-                # - user_id: Should be null when no reviews exist
-                # - Any other review-specific fields: Should remain null
-                group_cols = ["parent_asin", "window_start"]
-            else:
-                # Only process existing data buckets (no upsampling)
-                reviews_pl = reviews_pl.with_columns([
-                    pl.col('datetime').dt.truncate(calendar_window_interval).alias('window_start')
+            aggregated = aggregated.with_columns([
+                list_to_str('categories'),
+                list_to_str('features'),
+                list_to_str('description'),
+            ])
+            aggregated = aggregated.with_columns([
+                pl.concat_str([
+                    pl.lit("product name: "),
+                    pl.col('product_name').fill_null(''),
+                    pl.lit("\nproduct categories: "),
+                    pl.col('categories_str').fill_null(''),
+                    pl.lit("\n2023 price: "),
+                    pl.col('price').fill_null(''),
+                    pl.lit("\nbrand: "),
+                    pl.col('brand').fill_null(''),
+                    pl.lit("\nseller: "),
+                    pl.col('store').fill_null(''),
+                    pl.lit("\nproduct description: "),
+                    pl.col('description_str').fill_null(''),
+                    pl.lit("\nreviews: "),
+                    pl.col('aggregated_reviews').fill_null(''),
+                    pl.lit("\nproduct features: "),
+                    pl.col('features_str').fill_null('')
+                ]).alias('combined_text')
+            ])
+            aggregated = aggregated.with_columns([
+                pl.col('timestamp').dt.date().alias('date'),
+                pl.col('timestamp').dt.year().alias('year'),
+                pl.col('timestamp').dt.month().alias('month')
+            ])
+            if windowing_strategy == "calendar":
+                aggregated = aggregated.with_columns([
+                    pl.col('review_count_window').alias('avg_review_count_per_interval')
                 ])
-                group_cols = ['parent_asin', 'window_start']
-        elif windowing_strategy == "review_frequency":
-            # Create review frequency windows
-            reviews_pl = reviews_pl.sort(['parent_asin', 'datetime'])
-            reviews_pl = reviews_pl.with_columns([
-                pl.int_range(pl.len()).over('parent_asin').alias('row_nr')
-            ])
-            reviews_pl = reviews_pl.with_columns([
-                (pl.col('row_nr') // review_window_size).alias('window_id')
-            ])
-            group_cols = ['parent_asin', 'window_id']
-        else:
-            raise ValueError(f"Unsupported windowing strategy: {windowing_strategy}")
-        
-        # Define aggregations
-        agg_exprs = [
-            pl.col('rating').mean().alias('avg_rating_window'),
-            pl.col('count').sum().alias('review_count_window'),  # Sum the count column to get actual review count (handles upsampling correctly)
-        ]
-        
-        # Add weighted averages for helpful_vote and verified_purchase
-        if 'helpful_vote' in reviews_pl.columns and 'rating' in reviews_pl.columns:
-            # Helpful vote weighted average rating (weighted by number of helpful votes)
-            agg_exprs.append(
-                pl.when(pl.col('helpful_vote').sum() > 0)
-                .then((pl.col('helpful_vote') * pl.col('rating')).sum() / pl.col('helpful_vote').sum())
-                .otherwise(None)
-                .alias('helpful_vote_weighted_avg_rating')
-            )
-        else:
-            agg_exprs.append(pl.lit(None).alias('helpful_vote_weighted_avg_rating'))
-            
-        if 'verified_purchase' in reviews_pl.columns and 'rating' in reviews_pl.columns:
-            # Verified purchase weighted average rating (only considering verified purchases)
-            agg_exprs.append(
-                pl.when(pl.col('verified_purchase').sum() > 0)
-                .then((pl.col('verified_purchase').cast(pl.Float64) * pl.col('rating')).sum() / pl.col('verified_purchase').sum())
-                .otherwise(None)
-                .alias('verified_purchase_weighted_avg_rating')
-            )
-        else:
-            agg_exprs.append(pl.lit(None).alias('verified_purchase_weighted_avg_rating'))
-        
-        # Add metadata columns - use correct column names from metadata
-        # Check if columns exist before adding them to avoid errors
-        if 'product_name' in reviews_pl.columns:
-            agg_exprs.append(pl.col('product_name').first().alias('product_name'))
-        else:
-            agg_exprs.append(pl.lit('').alias('product_name'))
-            
-        if 'main_category' in reviews_pl.columns:
-            agg_exprs.append(pl.col('main_category').first().alias('main_category'))
-        else:
-            agg_exprs.append(pl.lit(category).alias('main_category'))
-            
-        if 'categories' in reviews_pl.columns:
-            agg_exprs.append(pl.col('categories').first().alias('categories'))
-        else:
-            agg_exprs.append(pl.lit('').alias('categories'))
-            
-        if 'brand' in reviews_pl.columns:
-            agg_exprs.append(pl.col('brand').first().alias('brand'))
-        else:
-            agg_exprs.append(pl.lit('').alias('brand'))
-            
-        if 'store' in reviews_pl.columns:
-            agg_exprs.append(pl.col('store').first().alias('store'))
-        else:
-            agg_exprs.append(pl.lit('').alias('store'))
-            
-        if 'price' in reviews_pl.columns:
-            agg_exprs.append(pl.col('price').first().alias('price'))
-        else:
-            agg_exprs.append(pl.lit('').alias('price'))
-            
-        if 'description' in reviews_pl.columns:
-            agg_exprs.append(pl.col('description').first().alias('description'))
-        else:
-            agg_exprs.append(pl.lit('').alias('description'))
-            
-        if 'features' in reviews_pl.columns:
-            agg_exprs.append(pl.col('features').first().alias('features'))
-        else:
-            agg_exprs.append(pl.lit('').alias('features'))
-            
-        if 'average_rating' in reviews_pl.columns:
-            agg_exprs.append(pl.col('average_rating').first().alias('avg_rating_metadata'))
-        else:
-            agg_exprs.append(pl.lit(None).alias('avg_rating_metadata'))
-
-        
-        # Handle review text aggregation - combine all formatted review texts
-        if 'formatted_review_text' in reviews_pl.columns:
-            agg_exprs.append(
-                pl.col('formatted_review_text').drop_nulls().str.join('').alias('aggregated_reviews')
-            )
-        else:
-            agg_exprs.append(pl.lit('').alias('aggregated_reviews'))
-        
-        # Add timestamp column - ensure we get a single value, not a list
-        if windowing_strategy == "calendar":
-            agg_exprs.append(pl.col('window_start').first().alias('timestamp'))
-        else:
-            agg_exprs.append(pl.col('datetime').first().alias('timestamp'))
-        
-        # Perform groupby aggregation
-        aggregated = reviews_pl.group_by(group_cols).agg(agg_exprs)
-        
-        # For upsampled data, ensure empty windows have correct values
-        if upsample:
-            # Fill null review counts with 0 (empty windows should have 0 reviews, not null)
-            aggregated = aggregated.with_columns([
-                pl.col('review_count_window').fill_null(0)
-            ])
-        
-        # Add ASIN column (rename parent_asin to asin for consistency)
-        aggregated = aggregated.with_columns([
-            pl.col('parent_asin').alias('asin')
-        ])
-        
-        # Create the final combined text column in the specified format
-        
-        # Convert any list[str] columns to string by joining with ', ' before concatenation
-        # Helper function to convert list[null] to list[str] and join, handling empty lists and nulls
-        def list_to_str(col_name):
-            return (
-                pl.when(pl.col(col_name).is_not_null())
-                .then(
-                    pl.col(col_name)
-                    .list.eval(pl.element().cast(str).fill_null(''))
-                    .list.join(', ')
-                )
-                .otherwise(pl.lit(''))
-                .alias(f"{col_name}_str")
-            )
-
-        aggregated = aggregated.with_columns([
-            list_to_str('categories'),
-            list_to_str('features'),
-            list_to_str('description'),
-        ])
-
-        # Now build the combined_text using the stringified columns
-        aggregated = aggregated.with_columns([
-            pl.concat_str([
-                pl.lit("product name: "),
-                pl.col('product_name').fill_null(''),
-                pl.lit("\nproduct categories: "),
-                pl.col('categories_str').fill_null(''),
-                pl.lit("\n2023 price: "),
-                pl.col('price').fill_null(''),
-                pl.lit("\nbrand: "),
-                pl.col('brand').fill_null(''),
-                pl.lit("\nseller: "),
-                pl.col('store').fill_null(''),
-                pl.lit("\nproduct description: "),
-                pl.col('description_str').fill_null(''),
-                pl.lit("\nreviews: "),
-                pl.col('aggregated_reviews').fill_null(''),
-                pl.lit("\nproduct features: "),
-                pl.col('features_str').fill_null('')
-            ]).alias('combined_text')
-        ])
-        
-        # Add date columns
-        aggregated = aggregated.with_columns([
-            pl.col('timestamp').dt.date().alias('date'),
-            pl.col('timestamp').dt.year().alias('year'),
-            pl.col('timestamp').dt.month().alias('month')
-        ])
-        
-        # Add avg_review_count_per_interval for calendar windows
-        if windowing_strategy == "calendar":
-            aggregated = aggregated.with_columns([
-                pl.col('review_count_window').alias('avg_review_count_per_interval')
-            ])
-        
-        # Convert back to pandas for consistency
-        result_df = aggregated.to_pandas()
-        
-        # Add rolling statistics first (we need review_count_window for calculations)
-        # Note: We use both types of rolling statistics for different purposes:
-        # 1. Time-based rolling (7d, 30d, 90d) - for calendar windows only
-        # 2. Window-count-based rolling (3w, 5w, 10w, 30w) - for both calendar and review frequency windows
-        if windowing_strategy == "calendar" and not result_df.empty:
+            batch_df = aggregated.to_pandas()
+            # Add rolling statistics for this batch (in pandas, after conversion)
+            if windowing_strategy == "calendar" and not batch_df.empty:
+                msg = f"Adding rolling statistics in batch {batch_idx+1}/{n_batches}"
+                logger.info(msg)
+                if slurm:
+                    print(msg, flush=True)
+                flush_logger(slurm)
+                try:
+                    batch_df = self._add_rolling_statistics_polars(batch_df, calendar_window_interval)
+                except Exception as e:
+                    if debug:
+                        logger.error(f"Error adding rolling statistics in batch {batch_idx+1}: {e}")
+                        import traceback
+                        logger.error(f"Full traceback:\n{traceback.format_exc()}")
+                        flush_logger(slurm)
+                        raise
+                    else:
+                        logger.warning(f"Error adding rolling statistics in batch {batch_idx+1}: {e}")
+                        logger.info("Continuing without rolling statistics for this batch")
+                        flush_logger(slurm)
+            # Add window-count-based rolling statistics for this batch
+            msg = f"Adding rolling window statistics in batch {batch_idx+1}/{n_batches}"
+            logger.info(msg)
+            if slurm:
+                print(msg, flush=True)
+            flush_logger(slurm)
             try:
-                result_df = self._add_rolling_statistics_polars(result_df, calendar_window_interval)
+                batch_df = self._add_rolling_window_statistics(batch_df, rolling_window_sizes)
             except Exception as e:
                 if debug:
-                    logger.error(f"Error adding rolling statistics: {e}")
+                    logger.error(f"Error adding rolling window statistics in batch {batch_idx+1}: {e}")
                     import traceback
                     logger.error(f"Full traceback:\n{traceback.format_exc()}")
-                    raise  # Re-raise the exception to stop processing
+                    flush_logger(slurm)
+                    raise
                 else:
-                    logger.warning(f"Error adding rolling statistics: {e}")
-                    logger.info("Continuing without rolling statistics")
+                    logger.warning(f"Error adding rolling window statistics in batch {batch_idx+1}: {e}")
+                    logger.info("Continuing without rolling window statistics for this batch")
+                    flush_logger(slurm)
+            all_results.append(batch_df)
+        # Concatenate all batch results
+        if not all_results:
+            return pd.DataFrame()
+        result_df = pd.concat(all_results, ignore_index=True)
         
-        result_df = self._add_rolling_window_statistics(result_df, rolling_window_sizes)
-        
-        # Select only the columns we want to keep
-        # Keep base columns and all rolling statistics
-        base_columns = ['asin', 'timestamp', 'date', 'year', 'month', 'combined_text', 'review_count_window', 'avg_review_count_per_interval',
-                       'avg_rating_window', 'helpful_vote_weighted_avg_rating', 'verified_purchase_weighted_avg_rating']
-        
-        # Add all rolling columns
-        rolling_columns = [col for col in result_df.columns if col.startswith('rolling_')]
-        columns_to_keep = base_columns + rolling_columns
-        
-        # Keep only the columns we want
-        available_columns = [col for col in columns_to_keep if col in result_df.columns]
-        result_df = result_df[available_columns]
         logger.info(f"Generated {len(result_df)} records from {len(valid_asins)} ASINs")
         logger.info(f"Total actual reviews aggregated: {result_df['review_count_window'].sum()}")
         return result_df
@@ -2090,11 +2027,13 @@ def download_huggingface(
     min_reviews: int = typer.Option(10, help="Minimum reviews per ASIN"),
     max_asins: Optional[int] = typer.Option(None, help="Maximum ASINs to extract (None = all ASINs)"),
     sample_reviews: Optional[int] = typer.Option(None, help="Sample size for testing"),
-    work_dir: Path = typer.Option(".", help="Working directory")
+    work_dir: Path = typer.Option(".", help="Working directory"),
+    slurm: bool = typer.Option(False, "--slurm", help="Flush log output for SLURM/plain mode")
 ):
     """Download HuggingFace data, save locally, and extract ASINs in one operation."""
+    setup_logging(slurm)
     max_asins_display = "All ASINs" if max_asins is None else str(max_asins)
-    with SlurmOutput(USE_SLURM) as out:
+    with SlurmOutput(slurm) as out:
         out.panel(
             f"[bold blue]Downloading HuggingFace Data & Extracting ASINs[/bold blue]\n"
             f"Category: {category}\n"
@@ -2127,11 +2066,13 @@ def merge_datasets(
     include_all_reviews: bool = typer.Option(True, help="Include all reviews in time window"),
     work_dir: Path = typer.Option(".", help="Working directory"),
     pull_huggingface: bool = typer.Option(False, help="Pull HuggingFace data from cloud instead of using local"),
-    debug: bool = typer.Option(False, "--debug", help="Enable debug mode with full tracebacks and stop on first error")
+    debug: bool = typer.Option(False, "--debug", help="Enable debug mode with full tracebacks and stop on first error"),
+    slurm: bool = typer.Option(False, "--slurm", help="Flush log output for SLURM/plain mode")
 ):
     """Merge Keepa price data with Amazon review data using different windowing strategies."""
+    setup_logging(slurm)
     valid_strategies = ["price_observation", "calendar", "review_frequency"]
-    with SlurmOutput(USE_SLURM) as out:
+    with SlurmOutput(slurm) as out:
         if windowing_strategy not in valid_strategies:
             out.print(f"[bold red]Invalid windowing strategy: {windowing_strategy}[/bold red]")
             out.print(f"Valid options: {', '.join(valid_strategies)}")
@@ -2216,10 +2157,12 @@ def full_pipeline(
     review_window_size: int = typer.Option(10, help="Reviews per window (for review_frequency strategy)"),
     include_all_reviews: bool = typer.Option(True, help="Include all reviews in time window"),
     sample_reviews: Optional[int] = typer.Option(None, help="Sample size for testing"),
-    work_dir: Path = typer.Option(".", help="Working directory")
+    work_dir: Path = typer.Option(".", help="Working directory"),
+    slurm: bool = typer.Option(False, "--slurm", help="Flush log output for SLURM/plain mode")
 ):
     """Run the complete pipeline: extract ASINs, download data, and merge."""
-    with SlurmOutput(USE_SLURM) as out:
+    setup_logging(slurm)
+    with SlurmOutput(slurm) as out:
         if windowing_strategy == "price_observation":
             strategy_desc = f"Price observation windows ({time_window_days} days around each price change)"
         elif windowing_strategy == "calendar":
@@ -2258,10 +2201,12 @@ def full_pipeline(
 @app.command()
 def list_categories(
     work_dir: Path = typer.Option(".", help="Working directory"),
-    show_info: bool = typer.Option(False, "--info", help="Show detailed information for each category")
+    show_info: bool = typer.Option(False, "--info", help="Show detailed information for each category"),
+    slurm: bool = typer.Option(False, "--slurm", help="Flush log output for SLURM/plain mode")
 ):
     """List available Amazon product categories from all_categories.txt."""
-    with SlurmOutput(USE_SLURM) as out:
+    setup_logging(slurm)
+    with SlurmOutput(slurm) as out:
         out.panel(
             "[bold blue]Loading Amazon Product Categories[/bold blue]",
             border_style="blue"
@@ -2311,11 +2256,14 @@ def process_huggingface_only(
     debug: bool = typer.Option(False, "--debug", help="Enable debug mode with full tracebacks and stop on first error"),
     use_polars: bool = typer.Option(False, "--polars", help="Use Polars for faster processing (requires polars package)"),
     rolling_window_sizes: list[int] = typer.Option([3, 5, 10, 30], help="Rolling window sizes for additional statistics"),
-    upsample: bool = typer.Option(False, "--upsample", help="Create empty buckets for missing time periods to maintain continuity for rolling statistics. Empty windows have review_count=0 (not counted as reviews). Example: if an ASIN has reviews in months 1-3 and 6-12, this creates empty observations for months 4-5.")
+    upsample: bool = typer.Option(False, "--upsample", help="Create empty buckets for missing time periods to maintain continuity for rolling statistics. Empty windows have review_count=0 (not counted as reviews). Example: if an ASIN has reviews in months 1-3 and 6-12, this creates empty observations for months 4-5."),
+    asins_per_batch: int = typer.Option(1000, help="Number of ASINs to process in each batch for memory efficiency (default: 1000)"),
+    slurm: bool = typer.Option(False, "--slurm", help="Flush log output for SLURM/plain mode")
 ):
     """Process HuggingFace review data without Keepa price data."""
+    setup_logging(slurm)
     valid_strategies = ["calendar", "review_frequency"]
-    with SlurmOutput(USE_SLURM) as out:
+    with SlurmOutput(slurm) as out:
         if windowing_strategy not in valid_strategies:
             out.print(f"[bold red]Invalid windowing strategy: {windowing_strategy}[/bold red]")
             out.print(f"Valid options: {', '.join(valid_strategies)}")
@@ -2349,7 +2297,7 @@ def process_huggingface_only(
                 out.print("[bold cyan]Using Polars for processing...[/bold cyan]")
                 combined_df = pipeline.process_huggingface_only_polars(
                     category, windowing_strategy, calendar_window_interval, 
-                    review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes, upsample
+                    review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes, upsample, asins_per_batch, slurm
                 )
             else:
                 out.print("[bold cyan]Using pandas processing...[/bold cyan]")
@@ -2412,10 +2360,12 @@ def process_huggingface_only(
 @app.command()
 def list_configurations(
     category: str = typer.Option(None, help="Filter by specific category"),
-    work_dir: Path = typer.Option(".", help="Working directory")
+    work_dir: Path = typer.Option(".", help="Working directory"),
+    slurm: bool = typer.Option(False, "--slurm", help="Flush log output for SLURM/plain mode")
 ):
     """List available processed dataset configurations (subdirectories)."""
-    with SlurmOutput(USE_SLURM) as out:
+    setup_logging(slurm)
+    with SlurmOutput(slurm) as out:
         out.panel(
             "[bold blue]Available Processed Dataset Configurations[/bold blue]",
             border_style="blue"
@@ -2492,10 +2442,12 @@ def list_configurations(
 @app.command()
 def category_info(
     category: str = typer.Argument(..., help="Category name to get information for"),
-    work_dir: Path = typer.Option(".", help="Working directory")
+    work_dir: Path = typer.Option(".", help="Working directory"),
+    slurm: bool = typer.Option(False, "--slurm", help="Flush log output for SLURM/plain mode")
 ):
     """Get detailed information about a specific category."""
-    with SlurmOutput(USE_SLURM) as out:
+    setup_logging(slurm)
+    with SlurmOutput(slurm) as out:
         out.panel(
             f"[bold blue]Category Information[/bold blue]\n"
             f"Category: {category}",

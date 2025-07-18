@@ -121,7 +121,7 @@ def category_processing(category: str, work_dir: str, use_slurm: bool = False,
         print(f"Processing data for category: {category}")
     else:
         console.print(f"[blue]Processing data for category: {category}[/blue]")
-    
+
     try:
         # Build command with all arguments
         cmd = [
@@ -130,6 +130,7 @@ def category_processing(category: str, work_dir: str, use_slurm: bool = False,
             "--slurm" if use_slurm else "",
             "process-huggingface-only",
             "--category", category,
+            "--polars",
             "--work-dir", work_dir,
             "--windowing-strategy", windowing_strategy
         ]
@@ -246,7 +247,7 @@ def process_category(
     success_count = 0
     total_strategies = 2
     
-    # Strategy 1: Calendar windowing with 1w intervals
+    # Strategy 1: Calendar windowing with 1mo intervals
     if use_slurm:
         print(f"Processing calendar windowing strategy for {category}")
     else:
@@ -254,16 +255,10 @@ def process_category(
     
     success1 = category_processing(
         category, work_dir, use_slurm, "calendar",
-        calendar_window_interval="1w",
-        review_window_size=review_window_size,
-        include_all_reviews=include_all_reviews,
-        min_reviews_per_asin=min_reviews_per_asin,
-        max_asins=max_asins,
-        sub_dir="calendar_1w",
-        pull_huggingface=pull_huggingface,
+        calendar_window_interval="1mo",
+        min_reviews_per_asin=100,
+        sub_dir="calendar_1mo",
         debug=debug,
-        use_polars=use_polars,
-        rolling_window_sizes=rolling_window_sizes,
         upsample=True
     )
     
@@ -278,17 +273,10 @@ def process_category(
     
     success2 = category_processing(
         category, work_dir, use_slurm, "review_frequency",
-        calendar_window_interval=calendar_window_interval,
         review_window_size=10,
-        include_all_reviews=include_all_reviews,
-        min_reviews_per_asin=min_reviews_per_asin,
-        max_asins=max_asins,
+        min_reviews_per_asin=100,
         sub_dir="review_frequency_10",
-        pull_huggingface=pull_huggingface,
-        debug=debug,
-        use_polars=use_polars,
-        rolling_window_sizes=rolling_window_sizes,
-        upsample=upsample
+        debug=debug
     )
     
     if success2:
