@@ -109,6 +109,7 @@ def category_processing(category: str, work_dir: str, use_slurm: bool = False,
                               windowing_strategy: str = "calendar", **kwargs) -> bool:
     """
     Process a single category using dataset_builder.py process-huggingface-only command
+    this method submits the subprocess for a single call to dataset_builder module
     
     Args:
         category: Category name to process
@@ -141,8 +142,6 @@ def category_processing(category: str, work_dir: str, use_slurm: bool = False,
         ])
         # Add optional arguments if provided
         for key, value in kwargs.items():
-            if key == "use_polars":
-                continue  # skip --polars, not needed
             if value is not None:
                 arg_name = key.replace('_', '-')
                 if isinstance(value, bool):
@@ -209,8 +208,7 @@ def process_category(
                                          help="Pull HuggingFace data from cloud instead of using local"),
     debug: bool = typer.Option(False, "--debug",
                               help="Enable debug mode with full tracebacks and stop on first error"),
-    use_polars: bool = typer.Option(True, "--polars",
-                                   help="Use Polars for faster processing (default: True)"),
+
     rolling_window_sizes: List[int] = typer.Option([3, 5, 10, 30], "--rolling-window-sizes",
                                                    help="Rolling window sizes for additional statistics"),
     upsample: bool = typer.Option(True, "--upsample",
@@ -220,6 +218,8 @@ def process_category(
     Process a single category based on SLURM array task ID.
     By default, runs both calendar windowing (1w intervals) and review frequency windowing (10 reviews).
     Loads categories from file and processes the category at the specified index.
+    this accepts an index, and does calendar and review frequency windowing strategies
+    for the category associated with that index in the categories list file
     """
     # Print at the very top to confirm entry
     print("Starting process_category", flush=True)
@@ -388,8 +388,7 @@ def process(
                                          help="Pull HuggingFace data from cloud instead of using local"),
     debug: bool = typer.Option(False, "--debug",
                               help="Enable debug mode with full tracebacks and stop on first error"),
-    use_polars: bool = typer.Option(False, "--polars",
-                                   help="Use Polars for faster processing (requires polars package)"),
+
     rolling_window_sizes: List[int] = typer.Option([3, 5, 10, 30], "--rolling-window-sizes",
                                                    help="Rolling window sizes for additional statistics"),
     upsample: bool = typer.Option(False, "--upsample",
@@ -432,7 +431,6 @@ def process(
             sub_dir=sub_dir,
             pull_huggingface=pull_huggingface,
             debug=debug,
-            use_polars=use_polars,
             rolling_window_sizes=rolling_window_sizes,
             upsample=upsample
         ):
