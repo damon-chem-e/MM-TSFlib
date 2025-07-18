@@ -387,7 +387,7 @@ class AmazonKeepaDataPipeline:
         output_dir = self.processed_datasets_dir / "huggingface_only"
         if sub_dir:
             output_dir = output_dir / sub_dir
-        batch_dir = output_dir / "batches"
+        batch_dir = output_dir / f"batches_{category}"
         batch_dir.mkdir(parents=True, exist_ok=True)
         n_batches = (len(valid_asins) + asins_per_batch - 1) // asins_per_batch
         for batch_idx in range(n_batches):
@@ -675,7 +675,7 @@ class AmazonKeepaDataPipeline:
         output_dir = self.processed_datasets_dir / "huggingface_only"
         if sub_dir:
             output_dir = output_dir / sub_dir
-        batch_dir = output_dir / "batches"
+        batch_dir = output_dir / f"batches_{category}"
         batch_files = sorted(batch_dir.glob(f"{category}_batch*.parquet"))
         if not batch_files:
             errorlog(f"No batch files found in {batch_dir}")
