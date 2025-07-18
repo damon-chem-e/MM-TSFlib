@@ -127,18 +127,20 @@ def category_processing(category: str, work_dir: str, use_slurm: bool = False,
         cmd = [
             sys.executable,
             "/home/damonp/projects/chimera_proj/amazon-data/lib/dataset_builder.py",
-            "--slurm" if use_slurm else "",
             "process-huggingface-only",
+        ]
+        if use_slurm:
+            cmd.append("--slurm")
+        cmd.extend([
             "--category", category,
-            "--polars",
             "--work-dir", work_dir,
             "--windowing-strategy", windowing_strategy
-        ]
-        
+        ])
         # Add optional arguments if provided
         for key, value in kwargs.items():
+            if key == "use_polars":
+                continue  # skip --polars, not needed
             if value is not None:
-                # Convert snake_case to kebab-case for command line
                 arg_name = key.replace('_', '-')
                 if isinstance(value, bool):
                     if value:

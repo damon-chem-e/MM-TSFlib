@@ -658,29 +658,25 @@ class AmazonKeepaDataPipeline:
                                        rolling_window_sizes: list[int] = [3, 5, 10, 30],
                                        upsample: bool = False,
                                        asins_per_batch: int = 1000,
-                                       slurm: bool = False) -> pd.DataFrame:
+                                       slurm: bool = False,
+                                       sub_dir: Optional[str] = None,
+                                       out=None) -> None:
         """
         Polars-based implementation of process_huggingface_only for better performance.
-        Now processes ASINs in batches for memory efficiency.
-        Args:
-            asins_per_batch: Number of ASINs to process in each batch (default: 1000)
-            slurm: If True, flush logger after each log message for SLURM/plain mode
+        Processes ASINs in batches, saving each batch to disk to minimize memory usage.
+        After all batches are processed, use finalize_batches to concatenate and clean up.
         """
-        try:
-            import polars as pl
-        except ImportError:
-            raise ImportError("Polars is required for this method. Install with: pip install polars")
-        
-        logger.info(f"Processing HuggingFace data for {category} using {windowing_strategy} strategy (Polars, batched)")
-        
+        import polars as pl
+        import gc
+        userlog = (lambda msg: out.print(msg) if out else logger.info(msg))
+        warnlog = (lambda msg: out.print(f"[yellow]{msg}[/yellow]") if out else logger.warning(msg))
+        errorlog = (lambda msg: out.print(f"[red]{msg}[/red]") if out else logger.error(msg))
+        userlog(f"Processing HuggingFace data for {category} using {windowing_strategy} strategy (Polars, batched, disk)")
         # Load data
         reviews_df, metadata_df = self.load_local_huggingface_data(category)
-        
         if reviews_df.empty or metadata_df.empty:
-            logger.warning(f"No data found for category {category}")
-            return pd.DataFrame()
-        
-        # Convert to Polars DataFrames
+            warnlog(f"No data found for category {category}")
+            return
         reviews_pl = pl.from_pandas(reviews_df)
         metadata_pl = pl.from_pandas(metadata_df)
         
@@ -692,44 +688,32 @@ class AmazonKeepaDataPipeline:
         # Limit to max_asins if specified (for debugging/testing)
         if max_asins is not None:
             valid_asins = valid_asins[:max_asins]
-            logger.info(f"Limited to first {max_asins} ASINs for debugging/testing")
-        
-        logger.info(f"Processing {len(valid_asins)} ASINs with at least {min_reviews_per_asin} reviews in batches of {asins_per_batch}")
-        
+            userlog(f"Limited to first {max_asins} ASINs for debugging/testing")
+        userlog(f"Processing {len(valid_asins)} ASINs with at least {min_reviews_per_asin} reviews in batches of {asins_per_batch}")
         if not valid_asins:
-            logger.warning("No ASINs meet the minimum review requirement")
-            return pd.DataFrame()
-        
-        # Prepare for batching
-        import sys
-        def flush_logger(slurm: bool = False):
-            if slurm:
-                sys.stdout.flush()
-        all_results = []
+            warnlog("No ASINs meet the minimum review requirement")
+            return
+        # Prepare output batch directory
+        output_dir = self.processed_datasets_dir / "huggingface_only"
+        if sub_dir:
+            output_dir = output_dir / sub_dir
+        batch_dir = output_dir / "batches"
+        batch_dir.mkdir(parents=True, exist_ok=True)
         n_batches = (len(valid_asins) + asins_per_batch - 1) // asins_per_batch
         for batch_idx in range(n_batches):
             batch_asins = valid_asins[batch_idx*asins_per_batch : (batch_idx+1)*asins_per_batch]
-            msg = f"Processing batch {batch_idx+1}/{n_batches} ({len(batch_asins)} ASINs)"
-            logger.info(msg)
-            if slurm:
-                print(msg, flush=True)
-            flush_logger(slurm)
-            # Filter reviews and metadata for this batch
+            userlog(f"  [Batch {batch_idx+1}/{n_batches}] Processing {len(batch_asins)} ASINs...")
             batch_reviews = reviews_pl.filter(pl.col('parent_asin').is_in(batch_asins))
             batch_metadata = metadata_pl.filter(pl.col('parent_asin').is_in(batch_asins)) if not metadata_pl.is_empty() else metadata_pl
-            # The rest of the logic is the same as before, but on batch_reviews/batch_metadata
-            # --- Begin original logic, but replace reviews_pl/metadata_pl with batch_reviews/batch_metadata ---
             reviews_pl_batch = batch_reviews
             metadata_pl_batch = batch_metadata
-            # Merge with metadata - use parent_asin for joining
             if not metadata_pl_batch.is_empty():
                 if 'parent_asin' in metadata_pl_batch.columns:
                     reviews_pl_batch = reviews_pl_batch.join(metadata_pl_batch, on='parent_asin', how='left')
                 else:
-                    logger.warning("Metadata does not have parent_asin column, skipping metadata join")
+                    warnlog("Metadata does not have parent_asin column, skipping metadata join")
             else:
-                logger.warning("No metadata available, processing without metadata")
-            # Rename columns as specified by user
+                warnlog("No metadata available, processing without metadata")
             column_renames = {}
             if 'title_right' in reviews_pl_batch.columns:
                 column_renames['title_right'] = 'product_name'
@@ -768,7 +752,7 @@ class AmazonKeepaDataPipeline:
                 ])
             if windowing_strategy == "calendar":
                 if upsample:
-                    logger.info(f"Creating upsampled time series per ASIN with {calendar_window_interval} windows (batch {batch_idx+1})")
+                    userlog(f"    Creating upsampled time series per ASIN with {calendar_window_interval} windows (batch {batch_idx+1})")
                     reviews_pl_batch = reviews_pl_batch.with_columns([
                         pl.col('datetime').dt.truncate(calendar_window_interval).alias('window_start')
                     ])
@@ -792,12 +776,6 @@ class AmazonKeepaDataPipeline:
                     if fill_expressions:
                         reviews_pl_batch = reviews_pl_batch.with_columns(fill_expressions)
                     group_cols = ["parent_asin", "window_start"]
-                    if upsample:
-                        msg = f"Upsampling in batch {batch_idx+1}/{n_batches}"
-                        logger.info(msg)
-                        if slurm:
-                            print(msg, flush=True)
-                        flush_logger(slurm)
                 else:
                     reviews_pl_batch = reviews_pl_batch.with_columns([
                         pl.col('datetime').dt.truncate(calendar_window_interval).alias('window_start')
@@ -813,6 +791,7 @@ class AmazonKeepaDataPipeline:
                 ])
                 group_cols = ['parent_asin', 'window_id']
             else:
+                errorlog(f"Unsupported windowing strategy: {windowing_strategy}")
                 raise ValueError(f"Unsupported windowing strategy: {windowing_strategy}")
             agg_exprs = [
                 pl.col('rating').mean().alias('avg_rating_window'),
@@ -936,55 +915,73 @@ class AmazonKeepaDataPipeline:
                     pl.col('review_count_window').alias('avg_review_count_per_interval')
                 ])
             batch_df = aggregated.to_pandas()
-            # Add rolling statistics for this batch (in pandas, after conversion)
             if windowing_strategy == "calendar" and not batch_df.empty:
-                msg = f"Adding rolling statistics in batch {batch_idx+1}/{n_batches}"
-                logger.info(msg)
-                if slurm:
-                    print(msg, flush=True)
-                flush_logger(slurm)
+                userlog(f"    [Batch {batch_idx+1}/{n_batches}] Adding rolling statistics...")
                 try:
                     batch_df = self._add_rolling_statistics_polars(batch_df, calendar_window_interval)
                 except Exception as e:
                     if debug:
-                        logger.error(f"Error adding rolling statistics in batch {batch_idx+1}: {e}")
+                        errorlog(f"Error adding rolling statistics in batch {batch_idx+1}: {e}")
                         import traceback
-                        logger.error(f"Full traceback:\n{traceback.format_exc()}")
-                        flush_logger(slurm)
+                        errorlog(f"Full traceback:\n{traceback.format_exc()}")
                         raise
                     else:
-                        logger.warning(f"Error adding rolling statistics in batch {batch_idx+1}: {e}")
-                        logger.info("Continuing without rolling statistics for this batch")
-                        flush_logger(slurm)
-            # Add window-count-based rolling statistics for this batch
-            msg = f"Adding rolling window statistics in batch {batch_idx+1}/{n_batches}"
-            logger.info(msg)
-            if slurm:
-                print(msg, flush=True)
-            flush_logger(slurm)
+                        warnlog(f"Error adding rolling statistics in batch {batch_idx+1}: {e}")
+                        userlog("Continuing without rolling statistics for this batch")
+            userlog(f"    [Batch {batch_idx+1}/{n_batches}] Adding rolling window statistics...")
             try:
                 batch_df = self._add_rolling_window_statistics(batch_df, rolling_window_sizes)
             except Exception as e:
                 if debug:
-                    logger.error(f"Error adding rolling window statistics in batch {batch_idx+1}: {e}")
+                    errorlog(f"Error adding rolling window statistics in batch {batch_idx+1}: {e}")
                     import traceback
-                    logger.error(f"Full traceback:\n{traceback.format_exc()}")
-                    flush_logger(slurm)
+                    errorlog(f"Full traceback:\n{traceback.format_exc()}")
                     raise
                 else:
-                    logger.warning(f"Error adding rolling window statistics in batch {batch_idx+1}: {e}")
-                    logger.info("Continuing without rolling window statistics for this batch")
-                    flush_logger(slurm)
-            all_results.append(batch_df)
-        # Concatenate all batch results
-        if not all_results:
-            return pd.DataFrame()
-        result_df = pd.concat(all_results, ignore_index=True)
-        
-        logger.info(f"Generated {len(result_df)} records from {len(valid_asins)} ASINs")
-        logger.info(f"Total actual reviews aggregated: {result_df['review_count_window'].sum()}")
-        return result_df
-    
+                    warnlog(f"Error adding rolling window statistics in batch {batch_idx+1}: {e}")
+                    userlog("Continuing without rolling window statistics for this batch")
+            batch_file = batch_dir / f"{category}_batch{batch_idx+1}.parquet"
+            batch_df.to_parquet(batch_file, index=False)
+            userlog(f"  [Batch {batch_idx+1}] Saved to {batch_file}")
+            del batch_df, aggregated, reviews_pl_batch, batch_reviews, batch_metadata, metadata_pl_batch
+            gc.collect()
+        userlog(f"All batches processed and saved to {batch_dir}. Use finalize_batches to concatenate and clean up.")
+
+    def finalize_batches(self, category: str, sub_dir: Optional[str] = None, out=None) -> None:
+        """
+        Concatenate all batch parquet files for a category/sub_dir, save as final merged parquet, and clean up batch files only if successful.
+        """
+        import glob
+        userlog = (lambda msg: out.print(msg) if out else logger.info(msg))
+        warnlog = (lambda msg: out.print(f"[yellow]{msg}[/yellow]") if out else logger.warning(msg))
+        errorlog = (lambda msg: out.print(f"[red]{msg}[/red]") if out else logger.error(msg))
+        output_dir = self.processed_datasets_dir / "huggingface_only"
+        if sub_dir:
+            output_dir = output_dir / sub_dir
+        batch_dir = output_dir / "batches"
+        batch_files = sorted(batch_dir.glob(f"{category}_batch*.parquet"))
+        if not batch_files:
+            errorlog(f"No batch files found in {batch_dir}")
+            return
+        userlog(f"Concatenating {len(batch_files)} batch files for {category}")
+        import pandas as pd
+        dfs = []
+        for f in batch_files:
+            userlog(f"  Loading {f.name}")
+            dfs.append(pd.read_parquet(f))
+        merged = pd.concat(dfs, ignore_index=True)
+        final_file = output_dir / f"{category}.parquet"
+        try:
+            merged.to_parquet(final_file, index=False)
+            userlog(f"Saved merged dataset to {final_file}")
+            for f in batch_files:
+                f.unlink()
+            batch_dir.rmdir()
+            userlog(f"Cleaned up batch files in {batch_dir}")
+        except Exception as e:
+            errorlog(f"Failed to save merged dataset: {e}")
+            errorlog("Batch files NOT deleted. Please check disk space and try again.")
+
     def _process_calendar_windows_huggingface_only(self, asin: str, asin_reviews: pd.DataFrame,
                                                   product_title: str, product_category: str,
                                                   product_brand: str, product_price: str,
@@ -2254,13 +2251,15 @@ def process_huggingface_only(
     sub_dir: Optional[str] = typer.Option(None, help="Subdirectory name for organizing different configurations"),
     pull_huggingface: bool = typer.Option(False, help="Pull HuggingFace data from cloud instead of using local"),
     debug: bool = typer.Option(False, "--debug", help="Enable debug mode with full tracebacks and stop on first error"),
-    use_polars: bool = typer.Option(False, "--polars", help="Use Polars for faster processing (requires polars package)"),
     rolling_window_sizes: list[int] = typer.Option([3, 5, 10, 30], help="Rolling window sizes for additional statistics"),
     upsample: bool = typer.Option(False, "--upsample", help="Create empty buckets for missing time periods to maintain continuity for rolling statistics. Empty windows have review_count=0 (not counted as reviews). Example: if an ASIN has reviews in months 1-3 and 6-12, this creates empty observations for months 4-5."),
     asins_per_batch: int = typer.Option(1000, help="Number of ASINs to process in each batch for memory efficiency (default: 1000)"),
     slurm: bool = typer.Option(False, "--slurm", help="Flush log output for SLURM/plain mode")
 ):
-    """Process HuggingFace review data without Keepa price data."""
+    """
+    Process HuggingFace review data without Keepa price data (Polars only, batch-to-disk).
+    After processing, run finalize_batches to merge and clean up.
+    """
     setup_logging(slurm)
     valid_strategies = ["calendar", "review_frequency"]
     with SlurmOutput(slurm) as out:
@@ -2274,7 +2273,7 @@ def process_huggingface_only(
             strategy_desc = f"Review frequency windows (every {review_window_size} reviews)"
         sub_dir_display = f"Subdirectory: {sub_dir}" if sub_dir else "Subdirectory: None (default location)"
         out.panel(
-            f"[bold blue]Processing HuggingFace Data Only[/bold blue]\n"
+            f"[bold blue]Processing HuggingFace Data Only (Polars, batch-to-disk)[/bold blue]\n"
             f"Category: {category}\n"
             f"Strategy: {strategy_desc}\n"
             f"Include All Reviews: {include_all_reviews}\n"
@@ -2293,60 +2292,14 @@ def process_huggingface_only(
                 if not category_dir.exists():
                     out.print("[bold red]Local HuggingFace data not found! Use --pull-huggingface to download.[/bold red]")
                     raise typer.Exit(1)
-            if use_polars:
-                out.print("[bold cyan]Using Polars for processing...[/bold cyan]")
-                combined_df = pipeline.process_huggingface_only_polars(
-                    category, windowing_strategy, calendar_window_interval, 
-                    review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes, upsample, asins_per_batch, slurm
-                )
-            else:
-                out.print("[bold cyan]Using pandas processing...[/bold cyan]")
-                combined_df = pipeline.process_huggingface_only(
-                    category, windowing_strategy, calendar_window_interval, 
-                    review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes, upsample
-                )
-            config_metadata = {
-                'data_source': 'huggingface_only',
-                'windowing_strategy': windowing_strategy,
-                'calendar_window_interval': calendar_window_interval if windowing_strategy == "calendar" else None,
-                'review_window_size': review_window_size if windowing_strategy == "review_frequency" else None,
-                'include_all_reviews': include_all_reviews,
-                'min_reviews_per_asin': min_reviews_per_asin,
-                'max_asins': max_asins,
-                'rolling_window_sizes': rolling_window_sizes,
-                'upsample': upsample
-            }
-            try:
-                output_paths = pipeline.save_organized_data(combined_df, category, config_metadata, sub_dir)
-                out.print("\n[bold green]Processing completed![/bold green]")
-                out.print("Output files:")
-                for file_type, path in output_paths.items():
-                    out.print(f"  {file_type}: {path}")
-                out.print(f"\n[bold]Dataset Summary:[/bold]")
-                out.print(f"  Total Records: {len(combined_df):,}")
-                out.print(f"  Unique ASINs: {combined_df['asin'].nunique():,}")
-                out.print(f"  Date Range: {combined_df['timestamp'].min().date()} to {combined_df['timestamp'].max().date()}")
-                out.print(f"  Average Reviews per Timepoint: {combined_df['review_count_window'].mean():.1f}")
-                if 'metadata' in output_paths:
-                    out.print(f"\n[bold yellow]Note:[/bold yellow] Product metadata has been saved to a separate file to reduce dataset size.")
-                    out.print(f"  Use the metadata file to join product information (title, category, brand, etc.) when needed.")
-                
-                # Show how to load this dataset
-                sub_dir_param = f" --sub-dir {sub_dir}" if sub_dir else ""
-                out.print(f"\n[bold]To load this dataset:[/bold]")
-                out.print(f"  pipeline = AmazonKeepaDataPipeline()")
-                out.print(f"  df, metadata = pipeline.load_dataset_with_metadata('{category}', sub_dir='{sub_dir or 'None'}')")
-                out.print(f"\n[bold]To list all configurations:[/bold]")
-                out.print(f"  python dataset_builder.py list-configurations")
-            except Exception as e:
-                if debug:
-                    out.print(f"[bold red]Error saving data: {e}[/bold red]")
-                    import traceback
-                    out.print(f"[bold red]Full traceback:[/bold red]\n{traceback.format_exc()}")
-                    raise typer.Exit(1)
-                else:
-                    out.print(f"[bold red]Error saving data: {e}[/bold red]")
-                    raise typer.Exit(1)
+            out.print("[bold cyan]Processing with Polars, saving each batch to disk...[/bold cyan]")
+            pipeline.process_huggingface_only_polars(
+                category, windowing_strategy, calendar_window_interval, 
+                review_window_size, include_all_reviews, min_reviews_per_asin, max_asins, debug, rolling_window_sizes, upsample, asins_per_batch, slurm, sub_dir, out
+            )
+            out.print("[bold green]All batches processed and saved. Now merging...[/bold green]")
+            pipeline.finalize_batches(category, sub_dir, out)
+            out.print("[bold green]Processing and merge completed![/bold green]")
         except Exception as e:
             if debug:
                 out.print(f"[bold red]Processing failed: {e}[/bold red]")
