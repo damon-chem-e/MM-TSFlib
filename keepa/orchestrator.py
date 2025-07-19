@@ -266,7 +266,8 @@ def process_category(
         min_reviews_per_asin=100,
         sub_dir="calendar_1mo",
         debug=debug,
-        upsample=True
+        upsample=True,
+        asins_per_batch=50_000  # Reduced batch size for Kindle_Store to prevent Parquet issues
     )
     
     if success1:
@@ -283,7 +284,8 @@ def process_category(
         review_window_size=10,
         min_reviews_per_asin=100,
         sub_dir="review_frequency_10",
-        debug=debug
+        debug=debug,
+        asins_per_batch=50_000  # Reduced batch size for Kindle_Store to prevent Parquet issues
     )
     
     if success2:

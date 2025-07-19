@@ -658,8 +658,13 @@ class AmazonKeepaDataPipeline:
                     userlog("Continuing without rolling window statistics for this batch")
             
             batch_file = batch_dir / f"{category}_batch{batch_idx+1}.parquet"
-            aggregated.write_parquet(batch_file)
-            userlog(f"  [Batch {batch_idx+1}] Saved to {batch_file}")
+            # Use helper method to write Parquet with progressive fallback
+            self._write_parquet_with_fallback(
+                aggregated, 
+                batch_file, 
+                f"[Batch {batch_idx+1}]", 
+                out
+            )
             del aggregated, reviews_pl_batch, batch_reviews, batch_metadata, metadata_pl_batch
             gc.collect()
         userlog(f"All batches processed and saved to {batch_dir}. Use finalize_batches to concatenate and clean up.")
@@ -691,8 +696,13 @@ class AmazonKeepaDataPipeline:
         
         final_file = output_dir / f"{category}.parquet"
         try:
-            merged.write_parquet(final_file)
-            userlog(f"Saved merged dataset to {final_file}")
+            # Use helper method to write Parquet with progressive fallback
+            self._write_parquet_with_fallback(
+                merged, 
+                final_file, 
+                "Final merge", 
+                out
+            )
             for f in batch_files:
                 f.unlink()
             batch_dir.rmdir()
@@ -1307,6 +1317,57 @@ class AmazonKeepaDataPipeline:
                 logger.info(f"Removed redundant metadata column: {col}")
         
         return df
+
+    def _write_parquet_with_fallback(self, df_pl, file_path: Path, context: str = "", out=None):
+        """
+        Write Polars DataFrame to Parquet with progressive fallback for row group sizes.
+        
+        This method handles the Parquet page size limitation by trying progressively smaller
+        row group sizes until one succeeds.
+        
+        Args:
+            df_pl: Polars DataFrame to write
+            file_path: Path to save the Parquet file
+            context: Context string for logging (e.g., "Batch 1", "Final merge")
+            out: Output handler for logging
+            
+        Returns:
+            int: The row group size that succeeded
+            
+        Raises:
+            Exception: If all row group sizes fail
+        """
+        import polars as pl
+        
+        userlog = (lambda msg: out.print(msg) if out else logger.info(msg))
+        errorlog = (lambda msg: out.print(f"[red]{msg}[/red]") if out else logger.error(msg))
+        
+        # Progressive fallback strategy for row group sizes
+        row_group_sizes = [1000, 500, 100, 50, 10]
+        
+        for row_group_size in row_group_sizes:
+            try:
+                userlog(f"  {context} Attempting to save with row group size: {row_group_size}")
+                df_pl.write_parquet(
+                    file_path,
+                    row_group_size=row_group_size,  # Progressively smaller row groups
+                    compression="snappy"   # Use snappy compression for better performance
+                )
+                userlog(f"  {context} Successfully saved with row group size: {row_group_size}")
+                return row_group_size
+            except Exception as e:
+                if "page can only contain i32::MAX uncompressed bytes" in str(e):
+                    errorlog(f"  {context} Parquet page size error with row group size {row_group_size} - trying smaller size")
+                    if row_group_size == row_group_sizes[-1]:  # Last attempt
+                        errorlog(f"  {context} All row group sizes failed. Dataset may be too large for Parquet format.")
+                        raise
+                    continue
+                else:
+                    # Non-page-size error, don't retry
+                    raise
+        
+        errorlog(f"  {context} Failed to save with any row group size")
+        raise Exception(f"Could not save {context} with any row group size")
 
     def _add_rolling_window_statistics(self, df_pl, window_sizes: list[int] = [3, 5, 10, 30]):
         """
