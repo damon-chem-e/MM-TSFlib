@@ -212,7 +212,9 @@ def process_category(
     rolling_window_sizes: List[int] = typer.Option([3, 5, 10, 30], "--rolling-window-sizes",
                                                    help="Rolling window sizes for additional statistics"),
     upsample: bool = typer.Option(True, "--upsample",
-                                 help="Create empty buckets for missing time periods (default: True)")
+                                 help="Create empty buckets for missing time periods (default: True)"),
+    asins_per_batch: int = typer.Option(100_000, "--asins-per-batch",
+                                       help="Number of ASINs to process in each batch for memory efficiency (default: 100,000)")
 ):
     """
     Process a single category based on SLURM array task ID.
@@ -267,7 +269,7 @@ def process_category(
         sub_dir="calendar_1mo",
         debug=debug,
         upsample=True,
-        asins_per_batch=50_000  # Reduced batch size for Kindle_Store to prevent Parquet issues
+        asins_per_batch=asins_per_batch
     )
     
     if success1:
@@ -285,7 +287,7 @@ def process_category(
         min_reviews_per_asin=100,
         sub_dir="review_frequency_10",
         debug=debug,
-        asins_per_batch=50_000  # Reduced batch size for Kindle_Store to prevent Parquet issues
+        asins_per_batch=asins_per_batch
     )
     
     if success2:
@@ -394,7 +396,9 @@ def process(
     rolling_window_sizes: List[int] = typer.Option([3, 5, 10, 30], "--rolling-window-sizes",
                                                    help="Rolling window sizes for additional statistics"),
     upsample: bool = typer.Option(False, "--upsample",
-                                 help="Create empty buckets for missing time periods")
+                                 help="Create empty buckets for missing time periods"),
+    asins_per_batch: int = typer.Option(100_000, "--asins-per-batch",
+                                       help="Number of ASINs to process in each batch for memory efficiency (default: 100,000)")
 ):
     """
     Process HuggingFace data for all categories listed in the categories file.
@@ -434,7 +438,8 @@ def process(
             pull_huggingface=pull_huggingface,
             debug=debug,
             rolling_window_sizes=rolling_window_sizes,
-            upsample=upsample
+            upsample=upsample,
+            asins_per_batch=asins_per_batch
         ):
             successful += 1
         else:
